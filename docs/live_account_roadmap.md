@@ -184,6 +184,8 @@ Validation:
 
 ## Stage 9: Backtest-To-Live Parity
 
+Status: Implemented.
+
 Goal: reduce drift between backtest assumptions and live strategy behavior.
 
 Required behavior:

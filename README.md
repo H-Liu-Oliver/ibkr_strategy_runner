@@ -360,6 +360,18 @@ Expected output includes:
 
 Dry runs should not create IBKR orders.
 
+Explain today's historical-data signal without touching state:
+
+```bash
+ibkr-strategy-runner --json leaps-explain \
+  --config configs-QQQ.json
+```
+
+`leaps-explain` uses the same `LeapsStrategyConfig` model and historical-bar
+signal logic as live execution. It intentionally does not model live-only
+behavior such as account sizing, current quote availability, option-chain
+selection, order routing, fills, commissions, or broker rejections.
+
 ## Paper Execution
 
 Submit paper orders only after dry-run output is understood:

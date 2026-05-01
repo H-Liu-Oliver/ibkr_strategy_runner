@@ -181,6 +181,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_leaps_state_args(reconcile)
     reconcile.set_defaults(handler=cmd_leaps_reconcile)
 
+    explain = subparsers.add_parser(
+        "leaps-explain",
+        help="Explain today's LEAPS signal decision without mutating state.",
+    )
+    explain.add_argument("--config", type=Path, help="LEAPS strategy config JSON.")
+    explain.set_defaults(handler=cmd_leaps_explain)
+
     bot_orders = subparsers.add_parser(
         "bot-orders",
         help="Show bot-owned orders from persisted LEAPS state.",
@@ -529,6 +536,13 @@ def cmd_leaps_reconcile(settings: Settings, args: argparse.Namespace) -> Any:
         result = trader.reconcile_state()
         AlertSink.from_env().emit_many(alert_events_from_cycle(result))
         return result
+
+
+def cmd_leaps_explain(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    with IBKRClient(settings) as client:
+        trader = LeapsTrader(client, config, state_store=object(), execute=False)
+        return trader.explain_today()
 
 
 def cmd_bot_orders(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:

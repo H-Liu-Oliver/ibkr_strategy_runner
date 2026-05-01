@@ -276,6 +276,41 @@ class LeapsTrader:
         self.state_store.record_event("reconcile", asdict(result))
         return result
 
+    def explain_today(self) -> dict[str, Any]:
+        signal = self._daily_signal()
+        triggered = signal.triggered
+        return {
+            "symbol": self.config.symbol.upper(),
+            "date": signal.bar_date,
+            "signal": asdict(signal),
+            "decision": {
+                "option_entry": "would_enter" if triggered else "hold",
+                "reason": (
+                    f"daily return {signal.daily_return:.4f} is at or below "
+                    f"signal_drop {self.config.signal_drop:.4f}"
+                    if triggered
+                    else (
+                        f"daily return {signal.daily_return:.4f} is above "
+                        f"signal_drop {self.config.signal_drop:.4f}"
+                    )
+                ),
+            },
+            "config": {
+                "symbol": self.config.symbol.upper(),
+                "hv_window": self.config.hv_window,
+                "signal_drop": self.config.signal_drop,
+                "target_delta": self.config.target_delta,
+                "dte_days": self.config.dte_days,
+                "trade_fraction": self.config.trade_fraction,
+                "max_positions": self.config.max_positions,
+            },
+            "live_only_notes": [
+                "DCA stock sizing also depends on account values, current quote, and persisted state.",
+                "Option contract selection also depends on the live option chain and option quote.",
+                "Execution prices, fills, commissions, and rejected orders are broker/runtime behavior.",
+            ],
+        }
+
     def _daily_signal(self) -> DailySignal:
         bars = self.client.historical_daily_bars(
             self.config.symbol,
