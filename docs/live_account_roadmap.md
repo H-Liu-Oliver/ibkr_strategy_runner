@@ -201,6 +201,8 @@ Validation:
 
 ## Stage 10: Simulation Harness
 
+Status: Implemented.
+
 Goal: test trading behavior without IBKR.
 
 Required scenarios:

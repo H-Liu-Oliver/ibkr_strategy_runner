@@ -601,9 +601,14 @@ Local verification:
 
 ```bash
 python -m compileall ibkr_strategy_runner
+python -m unittest discover -s tests
 python -m ibkr_strategy_runner --help
 python -m ibkr_strategy_runner --json leaps-example-config
 ```
+
+The test suite includes `ibkr_strategy_runner.simulation.SimulatedIBKRClient`,
+a CI-friendly harness for restart, fill, partial fill, rejection, expiry,
+risk-limit, and duplicate-cycle scenarios without connecting to IBKR.
 
 The project ignores secrets, virtualenvs, bytecode, logs, local configs, and
 runtime state through `.gitignore`.
