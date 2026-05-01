@@ -1,0 +1,53 @@
+# Secrets and local environment.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Local strategy configs can contain account-specific sizing/risk choices.
+configs-*.json
+!examples/*.json
+
+# Runtime state, journals, logs, and service output.
+state/
+.state/
+*.jsonl
+*.log
+*.pid
+*.sqlite
+*.sqlite3
+*.db
+
+# Python caches and build artifacts.
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and dependency folders.
+.venv/
+venv/
+env/
+.envrc
+
+# Local editor and OS metadata.
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local systemd copies or machine-specific overrides.
+*.service.local
+*.override.conf
