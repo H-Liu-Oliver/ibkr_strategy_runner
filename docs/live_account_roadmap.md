@@ -157,6 +157,8 @@ Validation:
 
 ## Stage 8: Alerting
 
+Status: Implemented.
+
 Goal: notify the operator about events that require attention.
 
 Planned alert events:

@@ -10,6 +10,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from .alerts import AlertEvent, AlertSink, alert_events_from_cycle, daemon_event, failure_event
 from .config import Settings, settings_from_args
 from .ibkr import IBKRClient, sorted_rows
 from .leaps_strategy import (
@@ -263,6 +264,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.set_defaults(handler=cmd_doctor)
 
+    alert_test = subparsers.add_parser(
+        "alert-test",
+        help="Emit a test alert to log and optionally a webhook.",
+    )
+    alert_test.add_argument("--webhook-url")
+    alert_test.add_argument("--dry-run", action="store_true")
+    alert_test.add_argument("--message", default="ibkr-strategy-runner alert test")
+    alert_test.set_defaults(handler=cmd_alert_test)
+
     example = subparsers.add_parser(
         "leaps-example-config",
         help="Print an example LEAPS-overlay config JSON.",
@@ -466,27 +476,37 @@ def cmd_leaps_once(settings: Settings, args: argparse.Namespace) -> Any:
         account = client.resolve_account()
         store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
         trader = LeapsTrader(client, config, store, execute=args.execute)
-        return trader.run_daily_cycle(force=args.force)
+        result = trader.run_daily_cycle(force=args.force)
+        AlertSink.from_env().emit_many(alert_events_from_cycle(result))
+        return result
 
 
 def cmd_run_leaps(settings: Settings, args: argparse.Namespace) -> None:
     config = load_leaps_config(args)
-    while True:
-        try:
-            with IBKRClient(settings) as client:
-                account = client.resolve_account()
-                store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
-                trader = LeapsTrader(client, config, store, execute=args.execute)
-                result = trader.run_daily_cycle(force=False)
-                emit(result, json_output=args.json)
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:
-            message = str(exc) or exc.__class__.__name__
-            print(f"run-leaps error: {message}", file=sys.stderr, flush=True)
-            if getattr(args, "debug", False):
-                traceback.print_exc()
-        time.sleep(max(args.interval, 1.0))
+    alert_sink = AlertSink.from_env()
+    alert_sink.emit(daemon_event("bot_start", "run-leaps daemon started"))
+    try:
+        while True:
+            try:
+                with IBKRClient(settings) as client:
+                    account = client.resolve_account()
+                    store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+                    trader = LeapsTrader(client, config, store, execute=args.execute)
+                    result = trader.run_daily_cycle(force=False)
+                    alert_sink.emit_many(alert_events_from_cycle(result))
+                    emit(result, json_output=args.json)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                alert_sink.emit(failure_event(exc, "run-leaps"))
+                message = str(exc) or exc.__class__.__name__
+                print(f"run-leaps error: {message}", file=sys.stderr, flush=True)
+                if getattr(args, "debug", False):
+                    traceback.print_exc()
+            time.sleep(max(args.interval, 1.0))
+    except KeyboardInterrupt:
+        alert_sink.emit(daemon_event("bot_stop", "run-leaps daemon stopped"))
+        raise
 
 
 def cmd_leaps_state(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
@@ -506,7 +526,9 @@ def cmd_leaps_reconcile(settings: Settings, args: argparse.Namespace) -> Any:
         account = client.resolve_account()
         store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
         trader = LeapsTrader(client, config, store, execute=False)
-        return trader.reconcile_state()
+        result = trader.reconcile_state()
+        AlertSink.from_env().emit_many(alert_events_from_cycle(result))
+        return result
 
 
 def cmd_bot_orders(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
@@ -735,6 +757,19 @@ def cmd_doctor(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     else:
         overall = "ok"
     return {"status": overall, "checks": checks}
+
+
+def cmd_alert_test(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    sink = AlertSink.from_env(webhook_url=args.webhook_url, dry_run=args.dry_run)
+    result = sink.emit(
+        AlertEvent(
+            event_type="test",
+            severity="info",
+            message=args.message,
+            payload={"command": "alert-test"},
+        )
+    )
+    return result
 
 
 def cmd_leaps_example_config(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:

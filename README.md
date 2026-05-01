@@ -490,6 +490,23 @@ ibkr-strategy-runner --json doctor \
   --state-dir /home/hliu/.local/state/ibkr-strategy-runner
 ```
 
+Alerts are emitted as structured log lines for daemon start/stop, cycle
+failures, submitted/rejected orders, fills, partial fills, reconciliation
+mismatches, and risk-limit breaches. To also POST alerts to a webhook, set:
+
+```bash
+IBKR_STRATEGY_RUNNER_ALERT_WEBHOOK_URL=https://example.invalid/webhook
+IBKR_STRATEGY_RUNNER_ALERT_WEBHOOK_TIMEOUT=5
+```
+
+Dry-run the alert path without sending a network request:
+
+```bash
+ibkr-strategy-runner --json alert-test \
+  --webhook-url https://example.invalid/webhook \
+  --dry-run
+```
+
 Important state fields:
 
 - `last_cycle_date`: last completed execute cycle.
