@@ -1,0 +1,15 @@
+[Unit]
+Description=ibkr-strategy-runner LEAPS overlay trading daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner
+ExecStart=/home/hliu/proj/trading/ibkr/smoke/.venv/bin/python -m ibkr_strategy_runner --env-file /home/hliu/proj/trading/ibkr/smoke/.env run-leaps --config /home/hliu/proj/trading/ibkr/ibkr_strategy_runner/examples/leaps-overlay.example.json --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+Restart=always
+RestartSec=60
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

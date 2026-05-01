@@ -1,0 +1,44 @@
+{
+  "symbol": "QQQ",
+  "primary_exchange": "NASDAQ",
+  "exchange": "SMART",
+  "currency": "USD",
+  "capital_base": "net_liquidation",
+  "strategy_capital_limit": null,
+  "buying_power_fraction": null,
+  "risk_free_rate": 0.04,
+  "hv_window": 30,
+  "signal_drop": -0.01,
+  "target_delta": 0.6,
+  "dte_days": 540,
+  "trade_fraction": 0.0125,
+  "max_positions": 5,
+  "dca_months": 14.0,
+  "equity_allocation": 0.7,
+  "option_allocation": 0.25,
+  "cash_buffer_allocation": 0.05,
+  "take_profit_rules": [
+    {
+      "max_holding_days": 120,
+      "pct_gain": 0.5
+    },
+    {
+      "max_holding_days": 180,
+      "pct_gain": 0.3
+    },
+    {
+      "max_holding_days": 270,
+      "pct_gain": 0.1
+    }
+  ],
+  "max_holding_days": 270,
+  "min_stock_order_dollars": 100.0,
+  "min_option_order_dollars": 100.0,
+  "history_duration": "90 D",
+  "quote_wait_seconds": 15,
+  "option_exchange": "SMART",
+  "option_chain_exchange": "",
+  "option_limit_offset": 0.0,
+  "stock_limit_offset": 0.0,
+  "rotate_when_full": true
+}

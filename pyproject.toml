@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ibkr-strategy-runner"
+version = "0.1.0"
+description = "A small IBKR paper-trading strategy runner and daemon."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ib_async>=2.0.1",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+ibkr-strategy-runner = "ibkr_strategy_runner.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
