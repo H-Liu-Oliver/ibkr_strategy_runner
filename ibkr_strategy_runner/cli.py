@@ -13,7 +13,7 @@ from typing import Any
 from .config import Settings, settings_from_args
 from .ibkr import IBKRClient, sorted_rows
 from .leaps_strategy import LeapsStrategyConfig, LeapsTrader
-from .live_state import StateStore
+from .live_state import ManagedOptionPosition, StateStore, today_iso
 from .models import Quote, ThresholdDecision
 from .strategy import evaluate_threshold
 
@@ -174,6 +174,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_leaps_state_args(reconcile)
     reconcile.set_defaults(handler=cmd_leaps_reconcile)
+
+    bot_orders = subparsers.add_parser(
+        "bot-orders",
+        help="Show bot-owned orders from persisted LEAPS state.",
+    )
+    add_leaps_state_args(bot_orders)
+    bot_orders.set_defaults(handler=cmd_bot_orders)
+
+    bot_positions = subparsers.add_parser(
+        "bot-positions",
+        help="Show managed option positions from persisted LEAPS state.",
+    )
+    add_leaps_state_args(bot_positions)
+    bot_positions.set_defaults(handler=cmd_bot_positions)
+
+    import_position = subparsers.add_parser(
+        "import-position",
+        help="Explicitly import an option position into bot-managed LEAPS state.",
+    )
+    add_leaps_state_args(import_position)
+    import_position.add_argument("--con-id", type=int, required=True)
+    import_position.add_argument("--local-symbol", required=True)
+    import_position.add_argument("--expiry", required=True)
+    import_position.add_argument("--strike", type=float, required=True)
+    import_position.add_argument("--right", choices=("C", "P"), required=True)
+    import_position.add_argument("--quantity", type=int, required=True)
+    import_position.add_argument("--entry-price", type=float, required=True)
+    import_position.add_argument("--entry-date", default=today_iso())
+    import_position.add_argument("--multiplier", type=int, default=100)
+    import_position.set_defaults(handler=cmd_import_position)
+
+    quarantine = subparsers.add_parser(
+        "quarantine-position",
+        help="Stop managing a persisted LEAPS option position.",
+    )
+    add_leaps_state_args(quarantine)
+    quarantine_target = quarantine.add_mutually_exclusive_group(required=True)
+    quarantine_target.add_argument("--con-id", type=int)
+    quarantine_target.add_argument("--local-symbol")
+    quarantine.set_defaults(handler=cmd_quarantine_position)
 
     example = subparsers.add_parser(
         "leaps-example-config",
@@ -403,11 +443,7 @@ def cmd_run_leaps(settings: Settings, args: argparse.Namespace) -> None:
 
 def cmd_leaps_state(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     config = load_leaps_config(args)
-    account = settings.account
-    if not account:
-        with IBKRClient(settings) as client:
-            account = client.resolve_account()
-    store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+    store = load_leaps_state_store(settings, args, config)
     state = store.load()
     return {
         "statePath": str(store.state_path),
@@ -423,6 +459,76 @@ def cmd_leaps_reconcile(settings: Settings, args: argparse.Namespace) -> Any:
         store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
         trader = LeapsTrader(client, config, store, execute=False)
         return trader.reconcile_state()
+
+
+def cmd_bot_orders(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    return {
+        "statePath": str(store.state_path),
+        "pendingOrders": [asdict(order) for order in state.pending_orders],
+        "completedOrders": [asdict(order) for order in state.completed_orders],
+    }
+
+
+def cmd_bot_positions(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    return {
+        "statePath": str(store.state_path),
+        "positions": [asdict(position) for position in state.positions],
+    }
+
+
+def cmd_import_position(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    if any(position.con_id == args.con_id and position.status != "CLOSED" for position in state.positions):
+        raise ValueError(f"Position con_id {args.con_id} already exists in bot state.")
+
+    position = ManagedOptionPosition(
+        symbol=config.symbol.upper(),
+        con_id=args.con_id,
+        local_symbol=args.local_symbol,
+        expiry=args.expiry,
+        strike=args.strike,
+        right=args.right,
+        multiplier=args.multiplier,
+        quantity=args.quantity,
+        entry_date=args.entry_date,
+        entry_price=args.entry_price,
+        status="OPEN",
+        source="imported",
+        notes=["imported by operator"],
+    )
+    state.positions.append(position)
+    store.save(state)
+    store.record_event("import-position", asdict(position))
+    return {
+        "statePath": str(store.state_path),
+        "imported": asdict(position),
+    }
+
+
+def cmd_quarantine_position(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    position = find_position(state.positions, args.con_id, args.local_symbol)
+    if position is None:
+        raise ValueError("Position was not found in bot state.")
+
+    position.status = "QUARANTINED"
+    position.notes.append("quarantined by operator")
+    store.save(state)
+    store.record_event("quarantine-position", asdict(position))
+    return {
+        "statePath": str(store.state_path),
+        "quarantined": asdict(position),
+    }
 
 
 def cmd_leaps_example_config(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
@@ -464,6 +570,31 @@ def load_leaps_config(args: argparse.Namespace) -> LeapsStrategyConfig:
     if args.config:
         return LeapsStrategyConfig.from_file(args.config)
     return LeapsStrategyConfig()
+
+
+def load_leaps_state_store(
+    settings: Settings,
+    args: argparse.Namespace,
+    config: LeapsStrategyConfig,
+) -> StateStore:
+    account = settings.account
+    if not account:
+        with IBKRClient(settings) as client:
+            account = client.resolve_account()
+    return StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+
+
+def find_position(
+    positions: list[ManagedOptionPosition],
+    con_id: int | None,
+    local_symbol: str | None,
+) -> ManagedOptionPosition | None:
+    for position in positions:
+        if con_id is not None and position.con_id == con_id:
+            return position
+        if local_symbol and position.local_symbol == local_symbol:
+            return position
+    return None
 
 
 def emit(value: Any, json_output: bool = False) -> None:

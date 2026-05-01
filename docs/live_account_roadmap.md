@@ -113,6 +113,8 @@ Validation:
 
 ## Stage 6: Position Ownership Boundary
 
+Status: Implemented.
+
 Goal: ensure the daemon only manages positions it owns.
 
 Required behavior:

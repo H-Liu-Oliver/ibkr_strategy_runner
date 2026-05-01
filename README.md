@@ -449,6 +449,18 @@ ibkr-strategy-runner --json leaps-state \
 tail -n 50 /home/hliu/.local/state/ibkr-strategy-runner/leaps-overlay_*_QQQ.jsonl
 ```
 
+Bot-owned orders and managed positions:
+
+```bash
+ibkr-strategy-runner --json bot-orders \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+
+ibkr-strategy-runner --json bot-positions \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+```
+
 Important state fields:
 
 - `last_cycle_date`: last completed execute cycle.
@@ -463,6 +475,33 @@ Order records use an explicit `lifecycle_state` so restarts can distinguish
 `expired`, `rejected`, and `unknown` orders. `unknown` means the bot could not
 prove the final broker state from open orders and execution reports; check IBKR
 manually before replacing that order.
+
+The daemon only manages option positions persisted in `positions` with
+`status="OPEN"`. Manual IBKR positions that are not in bot state are ignored.
+To explicitly let the bot manage an existing option position, import it:
+
+```bash
+ibkr-strategy-runner import-position \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+  --con-id 123456789 \
+  --local-symbol "QQQ  270115C00500000" \
+  --expiry 20270115 \
+  --strike 500 \
+  --right C \
+  --quantity 1 \
+  --entry-price 42.50 \
+  --entry-date 2026-05-01
+```
+
+To stop the bot from managing a persisted position:
+
+```bash
+ibkr-strategy-runner quarantine-position \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+  --con-id 123456789
+```
 
 ## Reconciliation And Recovery
 

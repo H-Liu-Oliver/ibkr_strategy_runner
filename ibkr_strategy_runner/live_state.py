@@ -315,6 +315,8 @@ class ManagedOptionPosition:
     closed_date: str | None = None
     close_price: float | None = None
     close_reason: str | None = None
+    source: str = "bot"
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
