@@ -19,6 +19,14 @@ from .live_state import (
     today_iso,
 )
 
+STALE_ORDER_POLICIES = frozenset(
+    {
+        "leave_until_expired",
+        "cancel_before_cycle",
+        "replace_after_cancel",
+    }
+)
+
 
 @dataclass(frozen=True)
 class TakeProfitRule:
@@ -61,6 +69,7 @@ class LeapsStrategyConfig:
     option_limit_offset: float = 0.0
     stock_limit_offset: float = 0.0
     rotate_when_full: bool = True
+    stale_order_policy: str = "leave_until_expired"
     max_single_order_value: float | None = None
     max_daily_order_count: int | None = None
     max_daily_notional: float | None = None
@@ -92,6 +101,11 @@ class LeapsStrategyConfig:
         return data
 
     def normalized_allocations(self) -> tuple[float, float, float]:
+        if self.stale_order_policy not in STALE_ORDER_POLICIES:
+            raise ValueError(
+                "stale_order_policy must be one of: "
+                f"{', '.join(sorted(STALE_ORDER_POLICIES))}."
+            )
         total = self.equity_allocation + self.option_allocation + self.cash_buffer_allocation
         if total <= 0:
             raise ValueError("Allocations must sum to a positive number.")
@@ -171,6 +185,7 @@ class LeapsTrader:
         )
 
         self._reconcile_submitted_positions(state, result)
+        self._apply_stale_order_policy(state, result, cycle_date)
         self._append_reconciliation_summary(state, result)
         block_reasons = reconciliation_block_reasons(result)
         if block_reasons:
@@ -255,6 +270,7 @@ class LeapsTrader:
             state_path=str(self.state_store.state_path),
         )
         self._reconcile_submitted_positions(state, result)
+        self._apply_stale_order_policy(state, result, result.date)
         self._append_reconciliation_summary(state, result)
         self.state_store.save(state)
         self.state_store.record_event("reconcile", asdict(result))
@@ -1049,6 +1065,123 @@ class LeapsTrader:
             }
         )
 
+    def _apply_stale_order_policy(
+        self,
+        state: StrategyState,
+        result: CycleResult,
+        cycle_date: str,
+    ) -> None:
+        if self.config.stale_order_policy not in STALE_ORDER_POLICIES:
+            raise ValueError(
+                "stale_order_policy must be one of: "
+                f"{', '.join(sorted(STALE_ORDER_POLICIES))}."
+            )
+
+        active_orders: list[ManagedOrder] = []
+        for order in state.pending_orders:
+            if not is_stale_order(order, cycle_date):
+                active_orders.append(order)
+                continue
+
+            action: dict[str, Any] = {
+                "type": "reconcile",
+                "action": "STALE_ORDER",
+                "order_id": order.order_id,
+                "symbol": order.symbol,
+                "created_date": order.created_date,
+                "cycle_date": cycle_date,
+                "policy": self.config.stale_order_policy,
+            }
+
+            if self.config.stale_order_policy == "leave_until_expired":
+                action.update(
+                    {
+                        "reason": (
+                            "stale order is still open; leaving it for IBKR to "
+                            "expire before placing replacement orders"
+                        ),
+                        "blocking": True,
+                    }
+                )
+                result.actions.append(action)
+                active_orders.append(order)
+                continue
+
+            if not self.execute:
+                action.update(
+                    {
+                        "execute": False,
+                        "reason": (
+                            "stale order would be cancelled in execute mode; "
+                            "dry-run leaves it unchanged"
+                        ),
+                        "blocking": True,
+                    }
+                )
+                result.actions.append(action)
+                active_orders.append(order)
+                continue
+
+            if order.order_id is None:
+                action.update(
+                    {
+                        "execute": True,
+                        "reason": "stale order has no broker order id and cannot be cancelled",
+                        "blocking": True,
+                    }
+                )
+                result.actions.append(action)
+                active_orders.append(order)
+                continue
+
+            cancel_result = self.client.cancel_order(order.order_id)
+            order.sync_from_broker(
+                {
+                    "orderId": order.order_id,
+                    "status": cancel_result.get("status"),
+                    "remaining": cancel_result.get("remaining"),
+                    "filled": order.filled,
+                }
+            )
+            action["execute"] = True
+            action["cancel"] = cancel_result
+
+            if order.lifecycle_state not in TERMINAL_ORDER_STATES:
+                action.update(
+                    {
+                        "reason": "stale order cancellation is not terminal yet",
+                        "lifecycle_state": order.lifecycle_state,
+                        "blocking": True,
+                    }
+                )
+                result.actions.append(action)
+                active_orders.append(order)
+                continue
+
+            order.mark_cleared([], today_iso())
+            state.completed_orders.append(order)
+            action["lifecycle_state"] = order.lifecycle_state
+            if self.config.stale_order_policy == "cancel_before_cycle":
+                action.update(
+                    {
+                        "reason": (
+                            "stale order was cancelled; wait until the next cycle "
+                            "before placing a replacement"
+                        ),
+                        "blocking": True,
+                    }
+                )
+            else:
+                action.update(
+                    {
+                        "reason": "stale order was cancelled; same-cycle replacement is enabled",
+                        "blocking": False,
+                    }
+                )
+            result.actions.append(action)
+
+        state.pending_orders = active_orders
+
     def _account_values(self, account: str) -> dict[str, float]:
         values: dict[str, float] = {}
         for row in self.client.account_summary(account):
@@ -1219,6 +1352,16 @@ def daily_order_usage(state: StrategyState, cycle_date: str) -> dict[str, float]
 
 def total_open_order_value(state: StrategyState) -> float:
     return sum(pending_order_value(order) for order in state.pending_orders)
+
+
+def is_stale_order(order: ManagedOrder, cycle_date: str) -> bool:
+    if order.lifecycle_state in TERMINAL_ORDER_STATES:
+        return False
+    if order.lifecycle_state == "unknown":
+        return False
+    if not order.created_date:
+        return False
+    return order.created_date < cycle_date
 
 
 def reconciliation_block_reasons(result: CycleResult) -> list[str]:

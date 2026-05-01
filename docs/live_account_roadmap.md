@@ -96,6 +96,8 @@ Validation:
 
 ## Stage 5: Stale Order Policy
 
+Status: Implemented.
+
 Goal: define and enforce what happens to unfilled orders.
 
 Planned policies:

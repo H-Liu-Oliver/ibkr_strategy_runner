@@ -128,6 +128,7 @@ Core fields:
   "dte_days": 540,
   "trade_fraction": 0.0125,
   "max_positions": 5,
+  "stale_order_policy": "leave_until_expired",
   "max_single_order_value": null,
   "max_daily_order_count": null,
   "max_daily_notional": null,
@@ -148,6 +149,15 @@ Capital sizing:
   at `$500,000`.
 
 The bot reports the effective `strategy_capital` in each non-skipped cycle.
+
+Stale order policy:
+
+- `leave_until_expired`: default; leave stale open DAY orders at IBKR and block
+  replacement orders until they expire or reconcile terminal.
+- `cancel_before_cycle`: in execute mode, cancel stale bot orders and wait until
+  the next cycle before replacing them.
+- `replace_after_cancel`: in execute mode, cancel stale bot orders and allow a
+  same-cycle replacement. Use this only after testing the behavior in paper.
 
 Risk limits:
 

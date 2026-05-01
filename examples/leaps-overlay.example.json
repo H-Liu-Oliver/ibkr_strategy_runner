@@ -41,6 +41,7 @@
   "option_limit_offset": 0.0,
   "stock_limit_offset": 0.0,
   "rotate_when_full": true,
+  "stale_order_policy": "leave_until_expired",
   "max_single_order_value": null,
   "max_daily_order_count": null,
   "max_daily_notional": null,

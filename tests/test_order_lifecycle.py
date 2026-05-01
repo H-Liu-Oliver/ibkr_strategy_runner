@@ -8,6 +8,7 @@ from typing import Any
 
 from ibkr_strategy_runner.leaps_strategy import CycleResult, LeapsStrategyConfig, LeapsTrader
 from ibkr_strategy_runner.live_state import ManagedOrder, StateStore, StrategyState
+from ibkr_strategy_runner.models import Quote
 
 
 class FakeReconcileClient:
@@ -30,8 +31,27 @@ class FakeReconcileClient:
 
 
 class FakeCycleClient(FakeReconcileClient):
+    def __init__(
+        self,
+        open_orders: list[dict[str, Any]] | None = None,
+        executions: list[dict[str, Any]] | None = None,
+        cancel_status: str = "Cancelled",
+    ) -> None:
+        super().__init__(open_orders=open_orders, executions=executions)
+        self.cancel_status = cancel_status
+        self.cancelled_orders: list[int] = []
+        self.stock_orders: list[dict[str, Any]] = []
+
     def resolve_account(self) -> str:
         return "DU123456"
+
+    def require_trading_account(
+        self,
+        account: str,
+        strategy_capital_limit: float | None = None,
+        require_cap: bool = False,
+    ) -> None:
+        return None
 
     def historical_daily_bars(
         self,
@@ -45,7 +65,47 @@ class FakeCycleClient(FakeReconcileClient):
         ]
 
     def account_summary(self, account: str) -> list[dict[str, Any]]:
-        raise AssertionError("strategy should not continue after blocked reconciliation")
+        return [
+            {"tag": "NetLiquidation", "value": "10000"},
+            {"tag": "AvailableFunds", "value": "10000"},
+            {"tag": "BuyingPower", "value": "40000"},
+        ]
+
+    def snapshot_quote(
+        self,
+        symbol: str,
+        primary_exchange: str | None = None,
+        timeout: int = 15,
+    ) -> Quote:
+        return Quote(symbol=symbol.upper(), bid=99.5, ask=100.5, last=100.0, close=100.0, market_data_type=3)
+
+    def cancel_order(self, order_id: int) -> dict[str, Any]:
+        self.cancelled_orders.append(order_id)
+        return {"orderId": order_id, "status": self.cancel_status, "remaining": 0}
+
+    def place_stock_limit_order(
+        self,
+        account: str,
+        symbol: str,
+        action: str,
+        quantity: float,
+        limit_price: float,
+        primary_exchange: str | None = None,
+        order_ref: str | None = None,
+        strategy_capital_limit: float | None = None,
+    ) -> dict[str, Any]:
+        order = {
+            "orderId": 99,
+            "permId": 9900,
+            "symbol": symbol.upper(),
+            "action": action,
+            "quantity": quantity,
+            "limitPrice": limit_price,
+            "orderRef": order_ref,
+            "status": "Submitted",
+        }
+        self.stock_orders.append(order)
+        return order
 
 
 def make_order(**overrides: Any) -> ManagedOrder:
@@ -63,6 +123,10 @@ def make_order(**overrides: Any) -> ManagedOrder:
     }
     payload.update(overrides)
     return ManagedOrder(**payload)
+
+
+def make_stale_order(**overrides: Any) -> ManagedOrder:
+    return make_order(created_date="2026-04-30", lifecycle_state="submitted", **overrides)
 
 
 def make_broker_order(**overrides: Any) -> dict[str, Any]:
@@ -321,6 +385,74 @@ class ManagedOrderLifecycleTest(unittest.TestCase):
             self.assertTrue(result.skipped)
             self.assertIn("reconciliation blocked trading", result.reason or "")
             self.assertIsNone(store.load().last_dry_run_cycle_date)
+
+    def test_default_stale_policy_leaves_order_and_blocks(self) -> None:
+        trader = LeapsTrader(FakeCycleClient(), LeapsStrategyConfig(), state_store=object())
+        state = StrategyState(
+            account="DU123456",
+            symbol="QQQ",
+            pending_orders=[make_stale_order()],
+        )
+        result = CycleResult(date="2026-05-01", mode="reconcile", account="DU123456", symbol="QQQ")
+
+        trader._apply_stale_order_policy(state, result, "2026-05-01")
+
+        self.assertEqual(len(state.pending_orders), 1)
+        self.assertEqual(result.actions[0]["policy"], "leave_until_expired")
+        self.assertTrue(result.actions[0]["blocking"])
+
+    def test_cancel_before_cycle_cancels_stale_order_and_blocks_replacement(self) -> None:
+        client = FakeCycleClient()
+        trader = LeapsTrader(
+            client,
+            LeapsStrategyConfig(stale_order_policy="cancel_before_cycle"),
+            state_store=object(),
+            execute=True,
+        )
+        state = StrategyState(
+            account="DU123456",
+            symbol="QQQ",
+            pending_orders=[make_stale_order()],
+        )
+        result = CycleResult(date="2026-05-01", mode="execute", account="DU123456", symbol="QQQ")
+
+        trader._apply_stale_order_policy(state, result, "2026-05-01")
+
+        self.assertEqual(client.cancelled_orders, [10])
+        self.assertEqual(state.pending_orders, [])
+        self.assertEqual(state.completed_orders[0].lifecycle_state, "cancelled")
+        self.assertTrue(result.actions[0]["blocking"])
+
+    def test_replace_after_cancel_allows_same_cycle_replacement(self) -> None:
+        client = FakeCycleClient(open_orders=[make_broker_order(createdDate="2026-04-30")])
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp), "leaps-overlay", "DU123456", "QQQ")
+            store.save(
+                StrategyState(
+                    strategy_name="leaps-overlay",
+                    account="DU123456",
+                    symbol="QQQ",
+                    pending_orders=[make_stale_order()],
+                )
+            )
+            trader = LeapsTrader(
+                client,
+                LeapsStrategyConfig(
+                    stale_order_policy="replace_after_cancel",
+                    dca_months=1,
+                    min_stock_order_dollars=1,
+                    strategy_capital_limit=10000,
+                ),
+                store,
+                execute=True,
+            )
+
+            result = trader.run_daily_cycle()
+
+            self.assertFalse(result.skipped)
+            self.assertEqual(client.cancelled_orders, [10])
+            self.assertEqual(len(client.stock_orders), 1)
+            self.assertEqual(store.load().last_cycle_date, "2026-05-01")
 
 
 if __name__ == "__main__":
