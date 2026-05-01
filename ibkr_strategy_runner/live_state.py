@@ -86,8 +86,6 @@ def lifecycle_from_broker_status(
 ) -> str:
     filled_qty = float(filled or 0.0)
     remaining_qty = float(remaining) if remaining is not None else None
-    if remaining_qty is not None and filled_qty > 0 and remaining_qty > 0:
-        return "partially_filled"
     if filled_qty > 0 and remaining_qty == 0:
         return "filled"
 
@@ -98,6 +96,8 @@ def lifecycle_from_broker_status(
         return "cancelled"
     if normalized in {"inactive", "validationerror"}:
         return "rejected"
+    if remaining_qty is not None and filled_qty > 0 and remaining_qty > 0:
+        return "partially_filled"
     if normalized in {"presubmitted"}:
         return "pre_submitted"
     if normalized in {"submitted", "pendingsubmit", "apipending", "pendingcancel"}:
@@ -263,10 +263,15 @@ class ManagedOrder:
     ) -> None:
         self.fills = fills
         self.cleared_date = cleared_date
-        if fills:
+        if fills and self.lifecycle_state not in TERMINAL_ORDER_STATES:
             self.transition_to(
                 "filled",
                 note="order is no longer open at IBKR and fill reports were found",
+            )
+        elif fills:
+            self.transition_to(
+                self.lifecycle_state,
+                note="order is terminal at IBKR and fill reports were found",
             )
         elif self.lifecycle_state in TERMINAL_ORDER_STATES:
             self.transition_to(

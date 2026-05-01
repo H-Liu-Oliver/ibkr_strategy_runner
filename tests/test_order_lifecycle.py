@@ -29,6 +29,25 @@ class FakeReconcileClient:
         return self._executions
 
 
+class FakeCycleClient(FakeReconcileClient):
+    def resolve_account(self) -> str:
+        return "DU123456"
+
+    def historical_daily_bars(
+        self,
+        symbol: str,
+        duration: str,
+        primary_exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"date": "2026-04-30", "close": 100.0},
+            {"date": "2026-05-01", "close": 101.0},
+        ]
+
+    def account_summary(self, account: str) -> list[dict[str, Any]]:
+        raise AssertionError("strategy should not continue after blocked reconciliation")
+
+
 def make_order(**overrides: Any) -> ManagedOrder:
     payload = {
         "type": "dca",
@@ -44,6 +63,24 @@ def make_order(**overrides: Any) -> ManagedOrder:
     }
     payload.update(overrides)
     return ManagedOrder(**payload)
+
+
+def make_broker_order(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "orderId": 10,
+        "permId": 10010,
+        "symbol": "QQQ",
+        "secType": "STK",
+        "action": "BUY",
+        "quantity": 3,
+        "limitPrice": 100.0,
+        "orderRef": "ibkr-strategy-runner:leaps:dca",
+        "status": "Submitted",
+        "filled": 0,
+        "remaining": 3,
+    }
+    payload.update(overrides)
+    return payload
 
 
 class ManagedOrderLifecycleTest(unittest.TestCase):
@@ -158,22 +195,96 @@ class ManagedOrderLifecycleTest(unittest.TestCase):
         self.assertEqual(result.actions[0]["action"], "PENDING_ORDER_CLEARED")
         self.assertIn("check manually", result.actions[0]["reason"])
 
+    def test_reconcile_marks_execution_filled_order_completed(self) -> None:
+        trader = LeapsTrader(
+            FakeReconcileClient(executions=[{"orderId": 10, "execId": "fill-1"}]),
+            LeapsStrategyConfig(),
+            state_store=object(),
+        )
+        state = StrategyState(
+            account="DU123456",
+            symbol="QQQ",
+            pending_orders=[make_order(lifecycle_state="submitted")],
+        )
+        result = CycleResult(date="2026-05-01", mode="reconcile", account="DU123456", symbol="QQQ")
+
+        trader._reconcile_submitted_positions(state, result)
+
+        self.assertEqual(state.pending_orders, [])
+        self.assertEqual(state.completed_orders[0].lifecycle_state, "filled")
+        self.assertEqual(state.completed_orders[0].fills, [{"orderId": 10, "execId": "fill-1"}])
+        self.assertFalse(result.actions[0].get("blocking", False))
+
+    def test_reconcile_keeps_partial_fill_pending(self) -> None:
+        trader = LeapsTrader(
+            FakeReconcileClient(
+                open_orders=[
+                    make_broker_order(status="Submitted", filled=1, remaining=2),
+                ]
+            ),
+            LeapsStrategyConfig(),
+            state_store=object(),
+        )
+        state = StrategyState(
+            account="DU123456",
+            symbol="QQQ",
+            pending_orders=[make_order(lifecycle_state="submitted")],
+        )
+        result = CycleResult(date="2026-05-01", mode="reconcile", account="DU123456", symbol="QQQ")
+
+        trader._reconcile_submitted_positions(state, result)
+
+        self.assertEqual(len(state.pending_orders), 1)
+        self.assertEqual(state.pending_orders[0].lifecycle_state, "partially_filled")
+        self.assertEqual(result.actions[0]["action"], "ORDER_PARTIALLY_FILLED")
+
+    def test_reconcile_moves_terminal_broker_statuses_to_completed(self) -> None:
+        cases = (
+            ("Filled", 3, 0, "filled"),
+            ("Cancelled", 0, 3, "cancelled"),
+            ("Expired", 0, 3, "expired"),
+            ("Inactive", 0, 3, "rejected"),
+        )
+        for status, filled, remaining, lifecycle_state in cases:
+            with self.subTest(status=status):
+                trader = LeapsTrader(
+                    FakeReconcileClient(
+                        open_orders=[
+                            make_broker_order(
+                                status=status,
+                                filled=filled,
+                                remaining=remaining,
+                            )
+                        ]
+                    ),
+                    LeapsStrategyConfig(),
+                    state_store=object(),
+                )
+                state = StrategyState(
+                    account="DU123456",
+                    symbol="QQQ",
+                    pending_orders=[make_order(lifecycle_state="submitted")],
+                )
+                result = CycleResult(
+                    date="2026-05-01",
+                    mode="reconcile",
+                    account="DU123456",
+                    symbol="QQQ",
+                )
+
+                trader._reconcile_submitted_positions(state, result)
+
+                self.assertEqual(state.pending_orders, [])
+                self.assertEqual(state.completed_orders[0].lifecycle_state, lifecycle_state)
+                self.assertEqual(result.actions[0]["action"], "ORDER_TERMINAL")
+
     def test_reconcile_keeps_unknown_open_order_pending(self) -> None:
         trader = LeapsTrader(
             FakeReconcileClient(
                 open_orders=[
-                    {
-                        "orderId": 10,
-                        "symbol": "QQQ",
-                        "secType": "STK",
-                        "action": "BUY",
-                        "quantity": 3,
-                        "limitPrice": 100.0,
-                        "orderRef": "ibkr-strategy-runner:leaps:dca",
-                        "status": "MysteryStatus",
-                        "filled": 0,
-                        "remaining": 3,
-                    }
+                    make_broker_order(
+                        status="MysteryStatus",
+                    )
                 ]
             ),
             LeapsStrategyConfig(),
@@ -191,6 +302,25 @@ class ManagedOrderLifecycleTest(unittest.TestCase):
         self.assertEqual(len(state.pending_orders), 1)
         self.assertEqual(state.pending_orders[0].lifecycle_state, "unknown")
         self.assertEqual(result.actions[0]["action"], "CHECK_ORDER_STATUS")
+
+    def test_cycle_refuses_new_orders_when_reconciliation_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp), "leaps-overlay", "DU123456", "QQQ")
+            store.save(
+                StrategyState(
+                    strategy_name="leaps-overlay",
+                    account="DU123456",
+                    symbol="QQQ",
+                    pending_orders=[make_order(lifecycle_state="submitted")],
+                )
+            )
+            trader = LeapsTrader(FakeCycleClient(), LeapsStrategyConfig(), store)
+
+            result = trader.run_daily_cycle()
+
+            self.assertTrue(result.skipped)
+            self.assertIn("reconciliation blocked trading", result.reason or "")
+            self.assertIsNone(store.load().last_dry_run_cycle_date)
 
 
 if __name__ == "__main__":

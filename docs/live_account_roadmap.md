@@ -75,6 +75,8 @@ Validation:
 
 ## Stage 4: Execution Reconciliation
 
+Status: Implemented.
+
 Goal: make startup and recovery deterministic after IBKR pauses, restarts, or
 disconnects.
 

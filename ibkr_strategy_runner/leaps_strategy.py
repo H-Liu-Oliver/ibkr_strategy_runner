@@ -14,6 +14,7 @@ from .live_state import (
     ManagedOrder,
     StateStore,
     StrategyState,
+    TERMINAL_ORDER_STATES,
     lifecycle_from_broker_status,
     today_iso,
 )
@@ -170,6 +171,14 @@ class LeapsTrader:
         )
 
         self._reconcile_submitted_positions(state, result)
+        self._append_reconciliation_summary(state, result)
+        block_reasons = reconciliation_block_reasons(result)
+        if block_reasons:
+            result.skipped = True
+            result.reason = "reconciliation blocked trading: " + "; ".join(block_reasons[:3])
+            self.state_store.save(state)
+            self.state_store.record_event("cycle", asdict(result))
+            return result
 
         completed_date = state.last_cycle_date if self.execute else state.last_dry_run_cycle_date
         if completed_date == cycle_date and not force:
@@ -246,6 +255,7 @@ class LeapsTrader:
             state_path=str(self.state_store.state_path),
         )
         self._reconcile_submitted_positions(state, result)
+        self._append_reconciliation_summary(state, result)
         self.state_store.save(state)
         self.state_store.record_event("reconcile", asdict(result))
         return result
@@ -862,8 +872,37 @@ class LeapsTrader:
             if order_id is not None and int(order_id) in open_orders_by_id:
                 latest = open_orders_by_id[int(order_id)]
                 pending_order.sync_from_broker(latest)
-                active_pending_orders.append(pending_order)
-                if pending_order.lifecycle_state == "unknown":
+                if pending_order.lifecycle_state in TERMINAL_ORDER_STATES:
+                    fills = executions_by_order_id.get(int(order_id), [])
+                    pending_order.mark_cleared(fills, today_iso())
+                    state.completed_orders.append(pending_order)
+                    result.actions.append(
+                        {
+                            "type": "reconcile",
+                            "action": "ORDER_TERMINAL",
+                            "order_id": order_id,
+                            "symbol": pending_order.symbol,
+                            "broker_status": pending_order.broker_status,
+                            "lifecycle_state": pending_order.lifecycle_state,
+                            "fills": fills,
+                            "reason": "IBKR returned a terminal order status",
+                        }
+                    )
+                else:
+                    active_pending_orders.append(pending_order)
+                if pending_order.lifecycle_state == "partially_filled":
+                    result.actions.append(
+                        {
+                            "type": "reconcile",
+                            "action": "ORDER_PARTIALLY_FILLED",
+                            "order_id": order_id,
+                            "symbol": pending_order.symbol,
+                            "filled": pending_order.filled,
+                            "remaining": pending_order.remaining,
+                            "reason": "order remains open with a partial fill",
+                        }
+                    )
+                elif pending_order.lifecycle_state == "unknown":
                     result.actions.append(
                         {
                             "type": "reconcile",
@@ -872,6 +911,7 @@ class LeapsTrader:
                             "symbol": pending_order.symbol,
                             "broker_status": pending_order.broker_status,
                             "reason": "IBKR returned an unknown order status for an open bot order",
+                            "blocking": True,
                         }
                     )
             else:
@@ -894,6 +934,7 @@ class LeapsTrader:
                                 "returned; check manually before placing replacement orders"
                             )
                         ),
+                        "blocking": not fills,
                     }
                 )
         state.pending_orders = active_pending_orders
@@ -917,6 +958,11 @@ class LeapsTrader:
                     "symbol": open_order.get("symbol"),
                     "order_ref": order_ref,
                     "lifecycle_state": adopted_order.lifecycle_state,
+                    "blocking": True,
+                    "reason": (
+                        "open bot order existed at IBKR but was not present in local state; "
+                        "review before placing new orders"
+                    ),
                 }
             )
 
@@ -939,6 +985,7 @@ class LeapsTrader:
                         "local_symbol": pos.local_symbol,
                         "order_id": pos.order_id,
                         "reason": "submitted order is not open and position was not found",
+                        "blocking": True,
                     }
                 )
 
@@ -955,6 +1002,52 @@ class LeapsTrader:
                             "con_id": pos.con_id,
                         }
                     )
+                else:
+                    result.actions.append(
+                        {
+                            "type": "reconcile",
+                            "action": "CHECK_MANUALLY",
+                            "local_symbol": pos.local_symbol,
+                            "order_id": pos.close_order_id,
+                            "reason": "close order is not open but position is still present",
+                            "blocking": True,
+                        }
+                    )
+
+        for order in state.completed_orders:
+            if order.lifecycle_state != "unknown":
+                continue
+            result.actions.append(
+                {
+                    "type": "reconcile",
+                    "action": "CHECK_UNKNOWN_COMPLETED_ORDER",
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "reason": (
+                        "completed bot order has unknown lifecycle state; resolve it "
+                        "before placing new orders"
+                    ),
+                    "blocking": True,
+                }
+            )
+
+    def _append_reconciliation_summary(
+        self,
+        state: StrategyState,
+        result: CycleResult,
+    ) -> None:
+        block_reasons = reconciliation_block_reasons(result)
+        result.actions.append(
+            {
+                "type": "reconcile",
+                "action": "SUMMARY",
+                "pending_orders": len(state.pending_orders),
+                "completed_orders": len(state.completed_orders),
+                "open_positions": len(state.open_positions()),
+                "blocking": bool(block_reasons),
+                "block_reasons": block_reasons,
+            }
+        )
 
     def _account_values(self, account: str) -> dict[str, float]:
         values: dict[str, float] = {}
@@ -1126,6 +1219,18 @@ def daily_order_usage(state: StrategyState, cycle_date: str) -> dict[str, float]
 
 def total_open_order_value(state: StrategyState) -> float:
     return sum(pending_order_value(order) for order in state.pending_orders)
+
+
+def reconciliation_block_reasons(result: CycleResult) -> list[str]:
+    reasons = []
+    for action in result.actions:
+        if action.get("action") == "SUMMARY":
+            continue
+        if not action.get("blocking"):
+            continue
+        reason = action.get("reason")
+        reasons.append(str(reason or action.get("action") or "reconciliation blocked trading"))
+    return reasons
 
 
 def underlying_position_value(

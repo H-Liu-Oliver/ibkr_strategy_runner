@@ -467,6 +467,9 @@ ibkr-strategy-runner --json leaps-reconcile \
 This compares persisted bot state with IBKR positions, open orders, and recent
 executions. Open bot orders remain in `pending_orders`; orders no longer open
 move to `completed_orders` with a terminal or `unknown` lifecycle state.
+Every reconcile run also emits a `SUMMARY` action. If `blocking` is true, the
+daemon refuses to continue into new strategy orders until the reported mismatch
+is resolved.
 
 If IBKR is offline, the service will log errors and retry on the next interval.
 It cannot trade while Gateway/TWS is down, but it should resume once IBKR is
