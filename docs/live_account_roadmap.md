@@ -221,6 +221,8 @@ Validation:
 
 ## Stage 11: Service Hardening
 
+Status: Implemented.
+
 Goal: make the daemon and IBKR runtime easier to operate.
 
 Required documentation:

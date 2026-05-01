@@ -396,6 +396,8 @@ ibkr-strategy-runner --json leaps-state \
 
 ## Long-Running Service
 
+Operational checklist: [docs/operator_runbook.md](docs/operator_runbook.md).
+
 The daemon command:
 
 ```bash
