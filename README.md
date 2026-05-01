@@ -463,6 +463,23 @@ ibkr-strategy-runner --json leaps-state \
 tail -n 50 /home/hliu/.local/state/ibkr-strategy-runner/leaps-overlay_*_QQQ.jsonl
 ```
 
+SQLite state is available for live auditability:
+
+```bash
+ibkr-strategy-runner --json migrate-state-sqlite \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+
+ibkr-strategy-runner --json status \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+  --state-backend sqlite
+```
+
+Set `IBKR_STRATEGY_RUNNER_STATE_BACKEND=sqlite` after migration to use SQLite
+for the daemon and operator commands. Keep a backup of the JSON state until the
+SQLite state has been reconciled against IBKR.
+
 Bot-owned orders and managed positions:
 
 ```bash

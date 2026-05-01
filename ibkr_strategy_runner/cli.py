@@ -21,6 +21,7 @@ from .leaps_strategy import (
 )
 from .live_state import ManagedOptionPosition, StateStore, today_iso
 from .models import Quote, ThresholdDecision
+from .sqlite_state import SQLiteStateStore, migrate_json_state_to_sqlite
 from .strategy import evaluate_threshold
 
 
@@ -280,6 +281,13 @@ def build_parser() -> argparse.ArgumentParser:
     alert_test.add_argument("--message", default="ibkr-strategy-runner alert test")
     alert_test.set_defaults(handler=cmd_alert_test)
 
+    migrate_sqlite = subparsers.add_parser(
+        "migrate-state-sqlite",
+        help="Migrate the current JSON state and journal into SQLite.",
+    )
+    add_leaps_state_args(migrate_sqlite)
+    migrate_sqlite.set_defaults(handler=cmd_migrate_state_sqlite)
+
     example = subparsers.add_parser(
         "leaps-example-config",
         help="Print an example LEAPS-overlay config JSON.",
@@ -327,6 +335,12 @@ def add_leaps_state_args(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=Path(os.getenv("IBKR_STRATEGY_RUNNER_STATE_DIR", "~/.local/state/ibkr-strategy-runner")).expanduser(),
         help="Directory for durable strategy state and journal files.",
+    )
+    parser.add_argument(
+        "--state-backend",
+        choices=("json", "sqlite"),
+        default=os.getenv("IBKR_STRATEGY_RUNNER_STATE_BACKEND", "json"),
+        help="State storage backend. Defaults to json.",
     )
 
 
@@ -481,7 +495,7 @@ def cmd_leaps_once(settings: Settings, args: argparse.Namespace) -> Any:
     config = load_leaps_config(args)
     with IBKRClient(settings) as client:
         account = client.resolve_account()
-        store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+        store = make_leaps_state_store(args, config, account)
         trader = LeapsTrader(client, config, store, execute=args.execute)
         result = trader.run_daily_cycle(force=args.force)
         AlertSink.from_env().emit_many(alert_events_from_cycle(result))
@@ -497,7 +511,7 @@ def cmd_run_leaps(settings: Settings, args: argparse.Namespace) -> None:
             try:
                 with IBKRClient(settings) as client:
                     account = client.resolve_account()
-                    store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+                    store = make_leaps_state_store(args, config, account)
                     trader = LeapsTrader(client, config, store, execute=args.execute)
                     result = trader.run_daily_cycle(force=False)
                     alert_sink.emit_many(alert_events_from_cycle(result))
@@ -531,7 +545,7 @@ def cmd_leaps_reconcile(settings: Settings, args: argparse.Namespace) -> Any:
     config = load_leaps_config(args)
     with IBKRClient(settings) as client:
         account = client.resolve_account()
-        store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+        store = make_leaps_state_store(args, config, account)
         trader = LeapsTrader(client, config, store, execute=False)
         result = trader.reconcile_state()
         AlertSink.from_env().emit_many(alert_events_from_cycle(result))
@@ -672,16 +686,7 @@ def cmd_journal(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     store = load_leaps_state_store(settings, args, config)
     if args.limit <= 0:
         raise ValueError("--limit must be positive.")
-    if not store.journal_path.exists():
-        return {"journalPath": str(store.journal_path), "events": []}
-    lines = store.journal_path.read_text().splitlines()[-args.limit :]
-    events = []
-    for line in lines:
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            events.append({"raw": line})
-    return {"journalPath": str(store.journal_path), "events": events}
+    return {"journalPath": str(store.journal_path), "events": store.journal_events(args.limit)}
 
 
 def cmd_fills(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
@@ -729,7 +734,7 @@ def cmd_doctor(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
         checks.append({"name": "ibkr", "status": "skipped", "message": "IBKR check skipped"})
 
     if config is not None and account:
-        store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+        store = make_leaps_state_store(args, config, account)
         state = store.load()
         checks.append(
             {
@@ -786,6 +791,17 @@ def cmd_alert_test(settings: Settings, args: argparse.Namespace) -> dict[str, An
     return result
 
 
+def cmd_migrate_state_sqlite(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    account = settings.account
+    if not account:
+        with IBKRClient(settings) as client:
+            account = client.resolve_account()
+    json_store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+    sqlite_store = SQLiteStateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+    return migrate_json_state_to_sqlite(json_store, sqlite_store)
+
+
 def cmd_leaps_example_config(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     return LeapsStrategyConfig().to_json_dict()
 
@@ -796,9 +812,10 @@ def cmd_systemd_unit(settings: Settings, args: argparse.Namespace) -> str:
     execute_arg = " --execute" if args.execute else ""
     env_arg = f" --env-file {args.env_file}" if args.env_file else ""
     account_arg = f" --account {settings.account}" if settings.account else ""
+    backend_arg = f" --state-backend {args.state_backend}" if args.state_backend != "json" else ""
     command = (
         f"{args.python} -m ibkr_strategy_runner{env_arg}{account_arg} "
-        f"run-leaps{config_arg} --state-dir {args.state_dir}{execute_arg}"
+        f"run-leaps{config_arg} --state-dir {args.state_dir}{backend_arg}{execute_arg}"
     )
     return "\n".join(
         [
@@ -831,11 +848,21 @@ def load_leaps_state_store(
     settings: Settings,
     args: argparse.Namespace,
     config: LeapsStrategyConfig,
-) -> StateStore:
+) -> Any:
     account = settings.account
     if not account:
         with IBKRClient(settings) as client:
             account = client.resolve_account()
+    return make_leaps_state_store(args, config, account)
+
+
+def make_leaps_state_store(
+    args: argparse.Namespace,
+    config: LeapsStrategyConfig,
+    account: str,
+) -> Any:
+    if getattr(args, "state_backend", "json") == "sqlite":
+        return SQLiteStateStore(args.state_dir, "leaps-overlay", account, config.symbol)
     return StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
 
 

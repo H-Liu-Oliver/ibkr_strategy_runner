@@ -241,6 +241,8 @@ Validation:
 
 ## Stage 12: State Storage Upgrade
 
+Status: Implemented.
+
 Goal: move from JSON files to SQLite for live auditability.
 
 Planned tables:

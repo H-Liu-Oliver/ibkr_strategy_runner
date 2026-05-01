@@ -373,28 +373,7 @@ class StateStore:
             )
 
         raw = json.loads(self.state_path.read_text())
-        positions = [
-            ManagedOptionPosition(**item)
-            for item in raw.get("positions", [])
-        ]
-        return StrategyState(
-            version=raw.get("version", STATE_VERSION),
-            strategy_name=raw.get("strategy_name", self.strategy_name),
-            symbol=raw.get("symbol", self.symbol),
-            account=raw.get("account", self.account),
-            created_at=raw.get("created_at", utc_now_iso()),
-            updated_at=raw.get("updated_at", utc_now_iso()),
-            last_cycle_date=raw.get("last_cycle_date"),
-            last_dry_run_cycle_date=raw.get("last_dry_run_cycle_date"),
-            dca_days_completed=int(raw.get("dca_days_completed", 0)),
-            dry_run_cycles_completed=int(raw.get("dry_run_cycles_completed", 0)),
-            positions=positions,
-            pending_orders=[ManagedOrder.from_dict(item) for item in raw.get("pending_orders", [])],
-            completed_orders=[
-                ManagedOrder.from_dict(item)
-                for item in raw.get("completed_orders", [])
-            ],
-        )
+        return state_from_dict(raw, self.strategy_name, self.account, self.symbol)
 
     def save(self, state: StrategyState) -> None:
         state.updated_at = utc_now_iso()
@@ -411,6 +390,47 @@ class StateStore:
         }
         with self.journal_path.open("a") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+    def journal_events(self, limit: int) -> list[dict[str, Any]]:
+        if not self.journal_path.exists():
+            return []
+        events = []
+        for line in self.journal_path.read_text().splitlines()[-limit:]:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                events.append({"raw": line})
+        return events
+
+
+def state_from_dict(
+    raw: dict[str, Any],
+    strategy_name: str,
+    account: str,
+    symbol: str,
+) -> StrategyState:
+    positions = [
+        ManagedOptionPosition(**item)
+        for item in raw.get("positions", [])
+    ]
+    return StrategyState(
+        version=raw.get("version", STATE_VERSION),
+        strategy_name=raw.get("strategy_name", strategy_name),
+        symbol=raw.get("symbol", symbol),
+        account=raw.get("account", account),
+        created_at=raw.get("created_at", utc_now_iso()),
+        updated_at=raw.get("updated_at", utc_now_iso()),
+        last_cycle_date=raw.get("last_cycle_date"),
+        last_dry_run_cycle_date=raw.get("last_dry_run_cycle_date"),
+        dca_days_completed=int(raw.get("dca_days_completed", 0)),
+        dry_run_cycles_completed=int(raw.get("dry_run_cycles_completed", 0)),
+        positions=positions,
+        pending_orders=[ManagedOrder.from_dict(item) for item in raw.get("pending_orders", [])],
+        completed_orders=[
+            ManagedOrder.from_dict(item)
+            for item in raw.get("completed_orders", [])
+        ],
+    )
 
 
 def utc_now_iso() -> str:
