@@ -29,6 +29,8 @@ Validation:
 
 ## Stage 2: Hard Risk Limits
 
+Status: Implemented.
+
 Goal: enforce local limits before an order can reach IBKR.
 
 Planned limits:

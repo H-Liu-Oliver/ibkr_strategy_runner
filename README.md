@@ -127,7 +127,14 @@ Core fields:
   "target_delta": 0.6,
   "dte_days": 540,
   "trade_fraction": 0.0125,
-  "max_positions": 5
+  "max_positions": 5,
+  "max_single_order_value": null,
+  "max_daily_order_count": null,
+  "max_daily_notional": null,
+  "max_total_open_order_value": null,
+  "max_stock_position_value": null,
+  "max_option_position_value": null,
+  "max_option_bid_ask_spread_pct": null
 }
 ```
 
@@ -141,6 +148,25 @@ Capital sizing:
   at `$500,000`.
 
 The bot reports the effective `strategy_capital` in each non-skipped cycle.
+
+Risk limits:
+
+- `max_single_order_value`: maximum notional for one order.
+- `max_daily_order_count`: maximum number of bot orders for one market bar date.
+- `max_daily_notional`: maximum bot order notional for one market bar date.
+- `max_total_open_order_value`: maximum notional already open plus the next
+  order.
+- `max_stock_position_value`: maximum stock sleeve value after the next stock
+  order.
+- `max_option_position_value`: maximum managed option value after the next
+  option order.
+- `max_option_bid_ask_spread_pct`: maximum option bid/ask spread as a fraction
+  of mid price.
+
+Unset limits are disabled. Real-account rollout should set conservative values
+before enabling live execution. Each cycle includes a `risk` info action with
+current daily order usage, open-order notional, sleeve values, and the active
+limits.
 
 ## Example: `configs-QQQ.json`
 

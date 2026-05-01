@@ -53,6 +53,13 @@ class LeapsStrategyConfig:
     option_limit_offset: float = 0.0
     stock_limit_offset: float = 0.0
     rotate_when_full: bool = True
+    max_single_order_value: float | None = None
+    max_daily_order_count: int | None = None
+    max_daily_notional: float | None = None
+    max_total_open_order_value: float | None = None
+    max_stock_position_value: float | None = None
+    max_option_position_value: float | None = None
+    max_option_bid_ask_spread_pct: float | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> "LeapsStrategyConfig":
@@ -184,6 +191,15 @@ class LeapsTrader:
                 "buying_power_fraction": self.config.buying_power_fraction,
             }
         )
+        result.actions.append(
+            self._risk_status_action(
+                state,
+                cycle_date,
+                underlying_position,
+                option_value,
+                signal.close,
+            )
+        )
 
         self._manage_exits(state, result)
         self._manage_dca_stock(state, result, strategy_capital, underlying_position)
@@ -282,12 +298,7 @@ class LeapsTrader:
             )
             return
 
-        if underlying_position and underlying_position.get("marketValue") is not None:
-            current_value = float(underlying_position["marketValue"])
-        elif underlying_position:
-            current_value = float(underlying_position.get("position") or 0.0) * price
-        else:
-            current_value = 0.0
+        current_value = underlying_position_value(underlying_position, price)
         target_value = net_liq * equity_alloc
         daily_budget = target_value / dca_days
         remaining_gap = max(target_value - current_value, 0.0)
@@ -311,6 +322,27 @@ class LeapsTrader:
             return
 
         limit_price = round(price + self.config.stock_limit_offset, 2)
+        order_value = shares * limit_price
+        risk_block = self._risk_block_reason(
+            state,
+            result.date,
+            "stock",
+            order_value,
+            current_stock_value=current_value,
+        )
+        if risk_block:
+            result.actions.append(
+                {
+                    "type": "dca",
+                    "action": "HOLD",
+                    "reason": risk_block,
+                    "order_value": order_value,
+                    "quantity": shares,
+                    "limit_price": limit_price,
+                }
+            )
+            return
+
         action = {
             "type": "dca",
             "action": "BUY",
@@ -318,6 +350,7 @@ class LeapsTrader:
             "quantity": shares,
             "limit_price": limit_price,
             "budget": budget,
+            "order_value": order_value,
             "execute": self.execute,
         }
         if self.execute:
@@ -342,6 +375,7 @@ class LeapsTrader:
                     "action": "BUY",
                     "quantity": shares,
                     "limitPrice": limit_price,
+                    "orderValue": order_value,
                     "status": order.get("status"),
                     "createdDate": result.date,
                 }
@@ -423,6 +457,28 @@ class LeapsTrader:
                 }
             )
             return
+        order_value = contracts * cost_per_contract
+        risk_block = self._risk_block_reason(
+            state,
+            result.date,
+            "option",
+            order_value,
+            option_value=option_value,
+            quote=quote,
+        )
+        if risk_block:
+            result.actions.append(
+                {
+                    "type": "option-entry",
+                    "action": "HOLD",
+                    "reason": risk_block,
+                    "order_value": order_value,
+                    "quantity": contracts,
+                    "limit_price": limit_price,
+                    "local_symbol": candidate.contract.localSymbol,
+                }
+            )
+            return
 
         action = {
             "type": "option-entry",
@@ -435,6 +491,7 @@ class LeapsTrader:
             "right": candidate.right,
             "quantity": contracts,
             "limit_price": limit_price,
+            "order_value": order_value,
             "theoretical_delta": candidate.theoretical_delta,
             "dte": candidate.dte,
             "execute": self.execute,
@@ -466,7 +523,124 @@ class LeapsTrader:
                     status="SUBMITTED",
                 )
             )
+            state.pending_orders.append(
+                {
+                    "type": "option-entry",
+                    "orderId": order.get("orderId"),
+                    "permId": order.get("permId"),
+                    "symbol": self.config.symbol.upper(),
+                    "localSymbol": candidate.contract.localSymbol,
+                    "secType": "OPT",
+                    "action": "BUY",
+                    "quantity": contracts,
+                    "limitPrice": limit_price,
+                    "multiplier": candidate.multiplier,
+                    "orderValue": order_value,
+                    "status": order.get("status"),
+                    "createdDate": result.date,
+                }
+            )
         result.actions.append(action)
+
+    def _risk_block_reason(
+        self,
+        state: StrategyState,
+        cycle_date: str,
+        order_kind: str,
+        order_value: float,
+        current_stock_value: float = 0.0,
+        option_value: float = 0.0,
+        quote: dict[str, Any] | None = None,
+    ) -> str | None:
+        if self.config.max_single_order_value is not None:
+            if order_value > self.config.max_single_order_value:
+                return (
+                    f"risk limit max_single_order_value exceeded: "
+                    f"{order_value:.2f} > {self.config.max_single_order_value:.2f}"
+                )
+
+        usage = daily_order_usage(state, cycle_date)
+        if self.config.max_daily_order_count is not None:
+            if usage["count"] + 1 > self.config.max_daily_order_count:
+                return (
+                    f"risk limit max_daily_order_count exceeded: "
+                    f"{usage['count'] + 1} > {self.config.max_daily_order_count}"
+                )
+
+        if self.config.max_daily_notional is not None:
+            next_daily_notional = usage["notional"] + order_value
+            if next_daily_notional > self.config.max_daily_notional:
+                return (
+                    f"risk limit max_daily_notional exceeded: "
+                    f"{next_daily_notional:.2f} > {self.config.max_daily_notional:.2f}"
+                )
+
+        if self.config.max_total_open_order_value is not None:
+            next_open_value = total_open_order_value(state) + order_value
+            if next_open_value > self.config.max_total_open_order_value:
+                return (
+                    f"risk limit max_total_open_order_value exceeded: "
+                    f"{next_open_value:.2f} > {self.config.max_total_open_order_value:.2f}"
+                )
+
+        if order_kind == "stock" and self.config.max_stock_position_value is not None:
+            next_stock_value = current_stock_value + order_value
+            if next_stock_value > self.config.max_stock_position_value:
+                return (
+                    f"risk limit max_stock_position_value exceeded: "
+                    f"{next_stock_value:.2f} > {self.config.max_stock_position_value:.2f}"
+                )
+
+        if order_kind == "option" and self.config.max_option_position_value is not None:
+            next_option_value = option_value + order_value
+            if next_option_value > self.config.max_option_position_value:
+                return (
+                    f"risk limit max_option_position_value exceeded: "
+                    f"{next_option_value:.2f} > {self.config.max_option_position_value:.2f}"
+                )
+
+        if order_kind == "option" and self.config.max_option_bid_ask_spread_pct is not None:
+            spread_pct = bid_ask_spread_pct(quote or {})
+            if spread_pct is None:
+                return "risk limit max_option_bid_ask_spread_pct could not be checked"
+            if spread_pct > self.config.max_option_bid_ask_spread_pct:
+                return (
+                    f"risk limit max_option_bid_ask_spread_pct exceeded: "
+                    f"{spread_pct:.4f} > {self.config.max_option_bid_ask_spread_pct:.4f}"
+                )
+
+        return None
+
+    def _risk_status_action(
+        self,
+        state: StrategyState,
+        cycle_date: str,
+        underlying_position: dict[str, Any] | None,
+        option_value: float,
+        underlying_price: float,
+    ) -> dict[str, Any]:
+        daily_usage = daily_order_usage(state, cycle_date)
+        return {
+            "type": "risk",
+            "action": "INFO",
+            "daily_order_count": daily_usage["count"],
+            "daily_notional": daily_usage["notional"],
+            "total_open_order_value": total_open_order_value(state),
+            "stock_position_value": underlying_position_value(
+                underlying_position,
+                underlying_price,
+            ),
+            "option_position_value": option_value,
+            "limits": {
+                "max_single_order_value": self.config.max_single_order_value,
+                "max_daily_order_count": self.config.max_daily_order_count,
+                "max_daily_notional": self.config.max_daily_notional,
+                "max_total_open_order_value": self.config.max_total_open_order_value,
+                "max_stock_position_value": self.config.max_stock_position_value,
+                "max_option_position_value": self.config.max_option_position_value,
+                "max_option_bid_ask_spread_pct": self.config.max_option_bid_ask_spread_pct,
+            },
+        }
 
     def _manage_exits(self, state: StrategyState, result: CycleResult) -> None:
         for pos in list(state.open_positions()):
@@ -897,3 +1071,49 @@ def option_sell_limit(quote: dict[str, Any], offset: float) -> float | None:
         if price is not None:
             return round(max(price - offset, 0.01), 2)
     return None
+
+
+def daily_order_usage(state: StrategyState, cycle_date: str) -> dict[str, float]:
+    count = 0
+    notional = 0.0
+    for order in [*state.pending_orders, *state.completed_orders]:
+        if order.get("createdDate") != cycle_date:
+            continue
+        count += 1
+        notional += pending_order_value(order)
+    return {"count": count, "notional": notional}
+
+
+def total_open_order_value(state: StrategyState) -> float:
+    return sum(pending_order_value(order) for order in state.pending_orders)
+
+
+def underlying_position_value(
+    underlying_position: dict[str, Any] | None,
+    fallback_price: float,
+) -> float:
+    if not underlying_position:
+        return 0.0
+    if underlying_position.get("marketValue") is not None:
+        return float(underlying_position["marketValue"])
+    return float(underlying_position.get("position") or 0.0) * fallback_price
+
+
+def pending_order_value(order: dict[str, Any]) -> float:
+    if order.get("orderValue") is not None:
+        return float(order["orderValue"])
+    quantity = float(order.get("quantity") or 0.0)
+    limit_price = float(order.get("limitPrice") or 0.0)
+    multiplier = float(order.get("multiplier") or (100.0 if order.get("secType") == "OPT" else 1.0))
+    return abs(quantity * limit_price * multiplier)
+
+
+def bid_ask_spread_pct(quote: dict[str, Any]) -> float | None:
+    bid = price_or_none(quote.get("bid"))
+    ask = price_or_none(quote.get("ask"))
+    if bid is None or ask is None or ask < bid:
+        return None
+    mid = (bid + ask) / 2.0
+    if mid <= 0:
+        return None
+    return (ask - bid) / mid

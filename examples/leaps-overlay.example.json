@@ -40,5 +40,12 @@
   "option_chain_exchange": "",
   "option_limit_offset": 0.0,
   "stock_limit_offset": 0.0,
-  "rotate_when_full": true
+  "rotate_when_full": true,
+  "max_single_order_value": null,
+  "max_daily_order_count": null,
+  "max_daily_notional": null,
+  "max_total_open_order_value": null,
+  "max_stock_position_value": null,
+  "max_option_position_value": null,
+  "max_option_bid_ask_spread_pct": null
 }
