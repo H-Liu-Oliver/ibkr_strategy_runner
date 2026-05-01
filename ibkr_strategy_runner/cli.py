@@ -12,7 +12,12 @@ from typing import Any
 
 from .config import Settings, settings_from_args
 from .ibkr import IBKRClient, sorted_rows
-from .leaps_strategy import LeapsStrategyConfig, LeapsTrader
+from .leaps_strategy import (
+    LeapsStrategyConfig,
+    LeapsTrader,
+    daily_order_usage,
+    total_open_order_value,
+)
 from .live_state import ManagedOptionPosition, StateStore, today_iso
 from .models import Quote, ThresholdDecision
 from .strategy import evaluate_threshold
@@ -214,6 +219,49 @@ def build_parser() -> argparse.ArgumentParser:
     quarantine_target.add_argument("--con-id", type=int)
     quarantine_target.add_argument("--local-symbol")
     quarantine.set_defaults(handler=cmd_quarantine_position)
+
+    status = subparsers.add_parser(
+        "status",
+        help="Show operator status from persisted LEAPS state.",
+    )
+    add_leaps_state_args(status)
+    status.set_defaults(handler=cmd_status)
+
+    risk = subparsers.add_parser(
+        "risk",
+        help="Show configured risk limits and current state usage.",
+    )
+    add_leaps_state_args(risk)
+    risk.add_argument("--date", default=today_iso(), help="Market bar date for daily usage.")
+    risk.set_defaults(handler=cmd_risk)
+
+    journal = subparsers.add_parser(
+        "journal",
+        help="Show recent persisted bot journal events.",
+    )
+    add_leaps_state_args(journal)
+    journal.add_argument("--limit", type=int, default=20)
+    journal.set_defaults(handler=cmd_journal)
+
+    fills = subparsers.add_parser(
+        "fills",
+        help="Show fills recorded in completed bot orders.",
+    )
+    add_leaps_state_args(fills)
+    fills.set_defaults(handler=cmd_fills)
+
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="Check config, state, IBKR connectivity, and service setup.",
+    )
+    add_leaps_state_args(doctor)
+    doctor.add_argument("--skip-ibkr", action="store_true")
+    doctor.add_argument(
+        "--service-unit",
+        type=Path,
+        default=Path("~/.config/systemd/user/ibkr-strategy-runner-leaps.service").expanduser(),
+    )
+    doctor.set_defaults(handler=cmd_doctor)
 
     example = subparsers.add_parser(
         "leaps-example-config",
@@ -529,6 +577,164 @@ def cmd_quarantine_position(settings: Settings, args: argparse.Namespace) -> dic
         "statePath": str(store.state_path),
         "quarantined": asdict(position),
     }
+
+
+def cmd_status(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    open_positions = state.open_positions()
+    unknown_orders = [
+        order for order in state.completed_orders
+        if order.lifecycle_state == "unknown"
+    ]
+    return {
+        "statePath": str(store.state_path),
+        "journalPath": str(store.journal_path),
+        "account": state.account,
+        "symbol": state.symbol,
+        "lastCycleDate": state.last_cycle_date,
+        "lastDryRunCycleDate": state.last_dry_run_cycle_date,
+        "pendingOrderCount": len(state.pending_orders),
+        "completedOrderCount": len(state.completed_orders),
+        "openPositionCount": len(open_positions),
+        "quarantinedPositionCount": len(
+            [position for position in state.positions if position.status == "QUARANTINED"]
+        ),
+        "unknownCompletedOrderCount": len(unknown_orders),
+        "needsAttention": bool(unknown_orders),
+    }
+
+
+def cmd_risk(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    usage = daily_order_usage(state, args.date)
+    return {
+        "statePath": str(store.state_path),
+        "date": args.date,
+        "usage": {
+            "dailyOrderCount": usage["count"],
+            "dailyNotional": usage["notional"],
+            "totalOpenOrderValue": total_open_order_value(state),
+        },
+        "limits": {
+            "max_single_order_value": config.max_single_order_value,
+            "max_daily_order_count": config.max_daily_order_count,
+            "max_daily_notional": config.max_daily_notional,
+            "max_total_open_order_value": config.max_total_open_order_value,
+            "max_stock_position_value": config.max_stock_position_value,
+            "max_option_position_value": config.max_option_position_value,
+            "max_option_bid_ask_spread_pct": config.max_option_bid_ask_spread_pct,
+        },
+    }
+
+
+def cmd_journal(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    if args.limit <= 0:
+        raise ValueError("--limit must be positive.")
+    if not store.journal_path.exists():
+        return {"journalPath": str(store.journal_path), "events": []}
+    lines = store.journal_path.read_text().splitlines()[-args.limit :]
+    events = []
+    for line in lines:
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            events.append({"raw": line})
+    return {"journalPath": str(store.journal_path), "events": events}
+
+
+def cmd_fills(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    fills = []
+    for order in state.completed_orders:
+        for fill in order.fills:
+            row = dict(fill)
+            row["orderId"] = order.order_id
+            row["symbol"] = order.symbol
+            row["localSymbol"] = order.local_symbol
+            row["orderType"] = order.type
+            fills.append(row)
+    return {"statePath": str(store.state_path), "fills": fills}
+
+
+def cmd_doctor(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    config: LeapsStrategyConfig | None = None
+    account = settings.account
+    try:
+        config = load_leaps_config(args)
+        config.normalized_allocations()
+        checks.append({"name": "config", "status": "ok", "message": "configuration loaded"})
+    except Exception as exc:
+        checks.append({"name": "config", "status": "error", "message": str(exc)})
+
+    if config is not None and not args.skip_ibkr:
+        try:
+            with IBKRClient(settings) as client:
+                account = client.resolve_account()
+                checks.append(
+                    {
+                        "name": "ibkr",
+                        "status": "ok",
+                        "message": "IBKR connection resolved account",
+                        "account": account,
+                    }
+                )
+        except Exception as exc:
+            checks.append({"name": "ibkr", "status": "error", "message": str(exc)})
+    elif args.skip_ibkr:
+        checks.append({"name": "ibkr", "status": "skipped", "message": "IBKR check skipped"})
+
+    if config is not None and account:
+        store = StateStore(args.state_dir, "leaps-overlay", account, config.symbol)
+        state = store.load()
+        checks.append(
+            {
+                "name": "state",
+                "status": "ok",
+                "message": "state loaded",
+                "statePath": str(store.state_path),
+                "pendingOrders": len(state.pending_orders),
+                "positions": len(state.positions),
+            }
+        )
+    elif config is not None:
+        checks.append(
+            {
+                "name": "state",
+                "status": "warning",
+                "message": "state check needs --account, IB_ACCOUNT, or IBKR resolution",
+            }
+        )
+
+    service_status = "ok" if args.service_unit.exists() else "warning"
+    checks.append(
+        {
+            "name": "service",
+            "status": service_status,
+            "message": (
+                "service unit file exists"
+                if args.service_unit.exists()
+                else "service unit file was not found"
+            ),
+            "path": str(args.service_unit),
+        }
+    )
+
+    if any(check["status"] == "error" for check in checks):
+        overall = "error"
+    elif any(check["status"] == "warning" for check in checks):
+        overall = "warning"
+    else:
+        overall = "ok"
+    return {"status": overall, "checks": checks}
 
 
 def cmd_leaps_example_config(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:

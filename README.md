@@ -452,11 +452,40 @@ tail -n 50 /home/hliu/.local/state/ibkr-strategy-runner/leaps-overlay_*_QQQ.json
 Bot-owned orders and managed positions:
 
 ```bash
+ibkr-strategy-runner --json status \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+
+ibkr-strategy-runner --json risk \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+
 ibkr-strategy-runner --json bot-orders \
   --config configs-QQQ.json \
   --state-dir /home/hliu/.local/state/ibkr-strategy-runner
 
 ibkr-strategy-runner --json bot-positions \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+```
+
+Recent journal events and recorded fills:
+
+```bash
+ibkr-strategy-runner --json journal \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+  --limit 20
+
+ibkr-strategy-runner --json fills \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+```
+
+Environment/config/service health check:
+
+```bash
+ibkr-strategy-runner --json doctor \
   --config configs-QQQ.json \
   --state-dir /home/hliu/.local/state/ibkr-strategy-runner
 ```

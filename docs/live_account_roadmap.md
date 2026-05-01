@@ -137,6 +137,8 @@ Validation:
 
 ## Stage 7: Operator Status Commands
 
+Status: Implemented.
+
 Goal: provide one-command operational visibility.
 
 Planned commands:
