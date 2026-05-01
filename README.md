@@ -448,6 +448,12 @@ Important state fields:
   execution reports.
 - `positions`: managed option positions tracked by the bot.
 
+Order records use an explicit `lifecycle_state` so restarts can distinguish
+`submitted`, `pre_submitted`, `partially_filled`, `filled`, `cancelled`,
+`expired`, `rejected`, and `unknown` orders. `unknown` means the bot could not
+prove the final broker state from open orders and execution reports; check IBKR
+manually before replacing that order.
+
 ## Reconciliation And Recovery
 
 Run reconciliation after IB Gateway/TWS pauses, reconnects, or restarts:
@@ -460,7 +466,7 @@ ibkr-strategy-runner --json leaps-reconcile \
 
 This compares persisted bot state with IBKR positions, open orders, and recent
 executions. Open bot orders remain in `pending_orders`; orders no longer open
-move to `completed_orders`.
+move to `completed_orders` with a terminal or `unknown` lifecycle state.
 
 If IBKR is offline, the service will log errors and retry on the next interval.
 It cannot trade while Gateway/TWS is down, but it should resume once IBKR is

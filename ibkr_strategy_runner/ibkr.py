@@ -502,6 +502,7 @@ class IBKRClient:
             rows.append(
                 {
                     "orderId": order.orderId,
+                    "permId": order.permId,
                     "account": order.account,
                     "symbol": contract.symbol,
                     "secType": contract.secType,

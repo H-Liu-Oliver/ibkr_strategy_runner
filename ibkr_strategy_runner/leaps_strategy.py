@@ -9,7 +9,14 @@ from typing import Any
 from ib_async import Contract, Option
 
 from .ibkr import IBKRClient, ib_number_or_none, price_or_none
-from .live_state import ManagedOptionPosition, StateStore, StrategyState, today_iso
+from .live_state import (
+    ManagedOptionPosition,
+    ManagedOrder,
+    StateStore,
+    StrategyState,
+    lifecycle_from_broker_status,
+    today_iso,
+)
 
 
 @dataclass(frozen=True)
@@ -366,19 +373,21 @@ class LeapsTrader:
             )
             action["order"] = order
             state.pending_orders.append(
-                {
-                    "type": "dca",
-                    "orderId": order.get("orderId"),
-                    "permId": order.get("permId"),
-                    "symbol": self.config.symbol.upper(),
-                    "secType": "STK",
-                    "action": "BUY",
-                    "quantity": shares,
-                    "limitPrice": limit_price,
-                    "orderValue": order_value,
-                    "status": order.get("status"),
-                    "createdDate": result.date,
-                }
+                ManagedOrder(
+                    type="dca",
+                    order_id=order.get("orderId"),
+                    perm_id=order.get("permId"),
+                    symbol=self.config.symbol.upper(),
+                    sec_type="STK",
+                    action="BUY",
+                    quantity=shares,
+                    limit_price=limit_price,
+                    order_value=order_value,
+                    order_ref=order.get("orderRef") or "ibkr-strategy-runner:leaps:dca",
+                    lifecycle_state=lifecycle_from_broker_status(order.get("status")),
+                    broker_status=order.get("status"),
+                    created_date=result.date,
+                )
             )
         result.actions.append(action)
 
@@ -524,21 +533,23 @@ class LeapsTrader:
                 )
             )
             state.pending_orders.append(
-                {
-                    "type": "option-entry",
-                    "orderId": order.get("orderId"),
-                    "permId": order.get("permId"),
-                    "symbol": self.config.symbol.upper(),
-                    "localSymbol": candidate.contract.localSymbol,
-                    "secType": "OPT",
-                    "action": "BUY",
-                    "quantity": contracts,
-                    "limitPrice": limit_price,
-                    "multiplier": candidate.multiplier,
-                    "orderValue": order_value,
-                    "status": order.get("status"),
-                    "createdDate": result.date,
-                }
+                ManagedOrder(
+                    type="option-entry",
+                    order_id=order.get("orderId"),
+                    perm_id=order.get("permId"),
+                    symbol=self.config.symbol.upper(),
+                    local_symbol=candidate.contract.localSymbol,
+                    sec_type="OPT",
+                    action="BUY",
+                    quantity=contracts,
+                    limit_price=limit_price,
+                    multiplier=candidate.multiplier,
+                    order_value=order_value,
+                    order_ref=order.get("orderRef") or "ibkr-strategy-runner:leaps:entry",
+                    lifecycle_state=lifecycle_from_broker_status(order.get("status")),
+                    broker_status=order.get("status"),
+                    created_date=result.date,
+                )
             )
         result.actions.append(action)
 
@@ -729,6 +740,28 @@ class LeapsTrader:
             pos.close_order_id = order.get("orderId")
             pos.close_price = exit_price
             pos.close_reason = reason
+            state.pending_orders.append(
+                ManagedOrder(
+                    type="option-exit",
+                    order_id=order.get("orderId"),
+                    perm_id=order.get("permId"),
+                    symbol=self.config.symbol.upper(),
+                    local_symbol=pos.local_symbol,
+                    sec_type="OPT",
+                    action="SELL",
+                    quantity=pos.quantity,
+                    limit_price=exit_price,
+                    multiplier=pos.multiplier,
+                    order_value=abs(pos.quantity * exit_price * pos.multiplier),
+                    order_ref=(
+                        order.get("orderRef")
+                        or f"ibkr-strategy-runner:leaps:exit:{reason.lower()}"
+                    ),
+                    lifecycle_state=lifecycle_from_broker_status(order.get("status")),
+                    broker_status=order.get("status"),
+                    created_date=result.date,
+                )
+            )
         result.actions.append(action)
 
     def _select_option_candidate(self, spot: float, sigma: float) -> OptionCandidate:
@@ -818,38 +851,48 @@ class LeapsTrader:
             if order.get("orderId") is not None
         }
 
-        active_pending_orders: list[dict[str, Any]] = []
+        active_pending_orders: list[ManagedOrder] = []
         known_pending_order_ids = {
-            int(order["orderId"])
+            int(order.order_id)
             for order in state.pending_orders
-            if order.get("orderId") is not None
+            if order.order_id is not None
         }
         for pending_order in state.pending_orders:
-            order_id = pending_order.get("orderId")
+            order_id = pending_order.order_id
             if order_id is not None and int(order_id) in open_orders_by_id:
                 latest = open_orders_by_id[int(order_id)]
-                pending_order["status"] = latest.get("status")
-                pending_order["remaining"] = latest.get("remaining")
-                pending_order["filled"] = latest.get("filled")
+                pending_order.sync_from_broker(latest)
                 active_pending_orders.append(pending_order)
+                if pending_order.lifecycle_state == "unknown":
+                    result.actions.append(
+                        {
+                            "type": "reconcile",
+                            "action": "CHECK_ORDER_STATUS",
+                            "order_id": order_id,
+                            "symbol": pending_order.symbol,
+                            "broker_status": pending_order.broker_status,
+                            "reason": "IBKR returned an unknown order status for an open bot order",
+                        }
+                    )
             else:
                 fills = executions_by_order_id.get(int(order_id), []) if order_id is not None else []
-                terminal_order = dict(pending_order)
-                terminal_order["clearedDate"] = today_iso()
-                terminal_order["fills"] = fills
-                terminal_order["status"] = "FILLED_OR_CLEARED" if fills else "CLEARED_NO_FILL_SEEN"
-                state.completed_orders.append(terminal_order)
+                pending_order.mark_cleared(fills, today_iso())
+                state.completed_orders.append(pending_order)
                 result.actions.append(
                     {
                         "type": "reconcile",
                         "action": "PENDING_ORDER_CLEARED",
                         "order_id": order_id,
-                        "symbol": pending_order.get("symbol"),
+                        "symbol": pending_order.symbol,
+                        "lifecycle_state": pending_order.lifecycle_state,
                         "fills": fills,
                         "reason": (
                             "order is no longer open at IBKR; fills were found"
                             if fills
-                            else "order is no longer open at IBKR; no fill report was returned"
+                            else (
+                                "order is no longer open at IBKR; no fill report was "
+                                "returned; check manually before placing replacement orders"
+                            )
                         ),
                     }
                 )
@@ -861,19 +904,10 @@ class LeapsTrader:
                 continue
             if not order_ref.startswith("ibkr-strategy-runner:leaps:"):
                 continue
-            adopted_order = {
-                "type": "dca" if order_ref.endswith(":dca") else "managed",
-                "orderId": order_id,
-                "symbol": open_order.get("symbol"),
-                "secType": open_order.get("secType"),
-                "action": open_order.get("action"),
-                "quantity": open_order.get("quantity"),
-                "limitPrice": open_order.get("limitPrice"),
-                "orderRef": order_ref,
-                "status": open_order.get("status"),
-                "remaining": open_order.get("remaining"),
-                "filled": open_order.get("filled"),
-            }
+            adopted_order = ManagedOrder.from_broker_open_order(
+                open_order,
+                order_type="dca" if order_ref.endswith(":dca") else "managed",
+            )
             state.pending_orders.append(adopted_order)
             result.actions.append(
                 {
@@ -882,6 +916,7 @@ class LeapsTrader:
                     "order_id": order_id,
                     "symbol": open_order.get("symbol"),
                     "order_ref": order_ref,
+                    "lifecycle_state": adopted_order.lifecycle_state,
                 }
             )
 
@@ -1077,7 +1112,12 @@ def daily_order_usage(state: StrategyState, cycle_date: str) -> dict[str, float]
     count = 0
     notional = 0.0
     for order in [*state.pending_orders, *state.completed_orders]:
-        if order.get("createdDate") != cycle_date:
+        created_date = (
+            order.created_date
+            if isinstance(order, ManagedOrder)
+            else order.get("createdDate")
+        )
+        if created_date != cycle_date:
             continue
         count += 1
         notional += pending_order_value(order)
@@ -1099,12 +1139,26 @@ def underlying_position_value(
     return float(underlying_position.get("position") or 0.0) * fallback_price
 
 
-def pending_order_value(order: dict[str, Any]) -> float:
+def pending_order_value(order: ManagedOrder | dict[str, Any]) -> float:
+    if isinstance(order, ManagedOrder):
+        if order.order_value is not None:
+            return float(order.order_value)
+        quantity = float(order.quantity or 0.0)
+        limit_price = float(order.limit_price or 0.0)
+        multiplier = float(
+            order.multiplier
+            or (100.0 if order.sec_type.upper() == "OPT" else 1.0)
+        )
+        return abs(quantity * limit_price * multiplier)
+
     if order.get("orderValue") is not None:
         return float(order["orderValue"])
     quantity = float(order.get("quantity") or 0.0)
     limit_price = float(order.get("limitPrice") or 0.0)
-    multiplier = float(order.get("multiplier") or (100.0 if order.get("secType") == "OPT" else 1.0))
+    multiplier = float(
+        order.get("multiplier")
+        or (100.0 if str(order.get("secType")).upper() == "OPT" else 1.0)
+    )
     return abs(quantity * limit_price * multiplier)
 
 

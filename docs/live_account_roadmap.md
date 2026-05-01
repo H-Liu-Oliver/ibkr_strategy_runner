@@ -51,6 +51,8 @@ Validation:
 
 ## Stage 3: Structured Order Lifecycle
 
+Status: Implemented.
+
 Goal: replace loose order dictionaries with durable typed order records.
 
 Lifecycle states:
