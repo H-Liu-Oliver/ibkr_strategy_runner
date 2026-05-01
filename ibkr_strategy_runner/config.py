@@ -15,6 +15,8 @@ class Settings:
     client_id: int
     account: str | None
     allow_order: bool
+    allow_live_trading: bool
+    live_account_allowlist: tuple[str, ...]
     default_exchange: str
     default_currency: str
     connect_timeout: float
@@ -54,6 +56,8 @@ def settings_from_args(args: Any) -> Settings:
         client_id=_as_int(args.client_id, "IB_CLIENT_ID", 201),
         account=args.account or _blank_to_none(os.getenv("IB_ACCOUNT")),
         allow_order=_as_bool(os.getenv("IB_ALLOW_ORDER", "false")),
+        allow_live_trading=_as_bool(os.getenv("IB_ALLOW_LIVE_TRADING", "false")),
+        live_account_allowlist=_as_csv_tuple(os.getenv("IB_LIVE_ACCOUNT_ALLOWLIST")),
         default_exchange=args.exchange or os.getenv("IB_DEFAULT_EXCHANGE", "SMART"),
         default_currency=args.currency or os.getenv("IB_DEFAULT_CURRENCY", "USD"),
         connect_timeout=_as_float(args.timeout, "IB_CONNECT_TIMEOUT", 10.0),
@@ -82,6 +86,12 @@ def _as_bool(value: str | bool | None) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _as_csv_tuple(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def _blank_to_none(value: str | None) -> str | None:

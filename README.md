@@ -19,8 +19,13 @@ This project is currently designed for **IBKR paper accounts**.
 The CLI intentionally has several trade guards:
 
 - It refuses to trade unless the selected account looks like an IBKR paper
-  account, usually `DU...`.
+  account, usually `DU...`, or live trading is explicitly enabled and
+  allowlisted.
 - Order submission requires `IB_ALLOW_ORDER=true`.
+- Real-account order submission also requires `IB_ALLOW_LIVE_TRADING=true` and
+  the account in `IB_LIVE_ACCOUNT_ALLOWLIST`.
+- Real-account strategy execution requires `strategy_capital_limit` in the
+  strategy config.
 - Strategy commands default to dry-run unless `--execute` is passed.
 - `leaps-once` and `run-leaps` complete at most one execute cycle per market bar
   unless `--force` is used.
@@ -65,6 +70,8 @@ IB_PORT=4002
 IB_CLIENT_ID=201
 IB_ACCOUNT=
 IB_ALLOW_ORDER=false
+IB_ALLOW_LIVE_TRADING=false
+IB_LIVE_ACCOUNT_ALLOWLIST=
 IB_DEFAULT_EXCHANGE=SMART
 IB_DEFAULT_CURRENCY=USD
 IBKR_STRATEGY_RUNNER_STATE_DIR=/home/hliu/.local/state/ibkr-strategy-runner
@@ -72,6 +79,11 @@ IBKR_STRATEGY_RUNNER_STATE_DIR=/home/hliu/.local/state/ibkr-strategy-runner
 
 Use `IB_ALLOW_ORDER=false` for setup and dry runs. Set it to `true` only when
 you intentionally want paper orders submitted.
+
+For real accounts, keep `IB_ALLOW_LIVE_TRADING=false` until the live-account
+readiness checklist in `docs/live_account_roadmap.md` is complete. A real
+account must also be listed in `IB_LIVE_ACCOUNT_ALLOWLIST`, and strategy
+execution requires a hard `strategy_capital_limit`.
 
 ## Basic Checks
 

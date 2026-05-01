@@ -6,6 +6,8 @@ tested, reviewed, and committed independently before moving to the next stage.
 
 ## Stage 1: Real-Account Safety Gate
 
+Status: Implemented.
+
 Goal: keep paper trading as the default and require explicit operator intent
 before any real account can submit orders.
 

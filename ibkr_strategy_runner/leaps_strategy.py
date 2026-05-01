@@ -137,7 +137,12 @@ class LeapsTrader:
 
     def run_daily_cycle(self, force: bool = False) -> CycleResult:
         account = self.client.resolve_account()
-        self.client.require_paper_account(account)
+        if self.execute:
+            self.client.require_trading_account(
+                account,
+                strategy_capital_limit=self.config.strategy_capital_limit,
+                require_cap=True,
+            )
         state = self.state_store.load()
         signal = self._daily_signal()
         cycle_date = signal.bar_date
@@ -209,7 +214,6 @@ class LeapsTrader:
 
     def reconcile_state(self) -> CycleResult:
         account = self.client.resolve_account()
-        self.client.require_paper_account(account)
         state = self.state_store.load()
         result = CycleResult(
             date=today_iso(),
@@ -325,6 +329,7 @@ class LeapsTrader:
                 limit_price=limit_price,
                 primary_exchange=self.config.primary_exchange,
                 order_ref="ibkr-strategy-runner:leaps:dca",
+                strategy_capital_limit=self.config.strategy_capital_limit,
             )
             action["order"] = order
             state.pending_orders.append(
@@ -442,6 +447,7 @@ class LeapsTrader:
                 quantity=contracts,
                 limit_price=limit_price,
                 order_ref="ibkr-strategy-runner:leaps:entry",
+                strategy_capital_limit=self.config.strategy_capital_limit,
             )
             action["order"] = order
             state.positions.append(
@@ -542,6 +548,7 @@ class LeapsTrader:
                 quantity=pos.quantity,
                 limit_price=exit_price,
                 order_ref=f"ibkr-strategy-runner:leaps:exit:{reason.lower()}",
+                strategy_capital_limit=self.config.strategy_capital_limit,
             )
             action["order"] = order
             pos.status = "CLOSE_SUBMITTED"

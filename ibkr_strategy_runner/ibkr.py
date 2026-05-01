@@ -70,6 +70,34 @@ class IBKRClient:
         if not account.startswith("DU"):
             raise RuntimeError(f"Refusing to trade on non-paper account: {account}")
 
+    def require_trading_account(
+        self,
+        account: str,
+        strategy_capital_limit: float | None = None,
+        require_cap: bool = False,
+    ) -> None:
+        if is_paper_account(account):
+            return
+
+        if not self.settings.allow_live_trading:
+            raise RuntimeError(
+                "Refusing live trading. Set IB_ALLOW_LIVE_TRADING=true only after "
+                "the real-account readiness checklist is complete."
+            )
+
+        if account not in self.settings.live_account_allowlist:
+            allowlist = ", ".join(self.settings.live_account_allowlist) or "<empty>"
+            raise RuntimeError(
+                f"Refusing live trading for account {account!r}; it is not in "
+                f"IB_LIVE_ACCOUNT_ALLOWLIST ({allowlist})."
+            )
+
+        if require_cap and strategy_capital_limit is None:
+            raise RuntimeError(
+                "Refusing live strategy execution without strategy_capital_limit. "
+                "Set a hard capital cap in the strategy config before live trading."
+            )
+
     def account_summary(self, account: str) -> list[dict[str, str]]:
         rows = []
         for row in self.ib.accountSummary(account):
@@ -266,7 +294,7 @@ class IBKRClient:
         primary_exchange: str | None = None,
         tif: str = "DAY",
     ) -> dict[str, Any]:
-        self.require_paper_account(account)
+        self.require_trading_account(account)
         contract = self.qualify_stock(symbol, exchange, currency, primary_exchange)
         order = make_limit_order(account, action, quantity, limit_price, tif)
         state = self.ib.whatIfOrder(contract, order)
@@ -308,7 +336,7 @@ class IBKRClient:
                 "Refusing to place order. Set IB_ALLOW_ORDER=true only for paper testing."
             )
 
-        self.require_paper_account(account)
+        self.require_trading_account(account, require_cap=True)
         contract = self.qualify_stock(symbol, exchange, currency, primary_exchange)
         order = make_limit_order(account, action, quantity, limit_price, tif)
         trade = self.ib.placeOrder(contract, order)
@@ -346,6 +374,7 @@ class IBKRClient:
         primary_exchange: str | None = None,
         tif: str = "DAY",
         order_ref: str | None = None,
+        strategy_capital_limit: float | None = None,
     ) -> dict[str, Any]:
         contract = self.qualify_stock(symbol, exchange, currency, primary_exchange)
         return self.place_contract_limit_order(
@@ -356,6 +385,7 @@ class IBKRClient:
             limit_price=limit_price,
             tif=tif,
             order_ref=order_ref,
+            strategy_capital_limit=strategy_capital_limit,
         )
 
     def what_if_contract_limit_order(
@@ -368,7 +398,7 @@ class IBKRClient:
         tif: str = "DAY",
         order_ref: str | None = None,
     ) -> dict[str, Any]:
-        self.require_paper_account(account)
+        self.require_trading_account(account)
         order = make_limit_order(account, action, quantity, limit_price, tif, order_ref)
         state = self.ib.whatIfOrder(contract, order)
 
@@ -400,13 +430,18 @@ class IBKRClient:
         limit_price: float,
         tif: str = "DAY",
         order_ref: str | None = None,
+        strategy_capital_limit: float | None = None,
     ) -> dict[str, Any]:
         if not self.settings.allow_order:
             raise RuntimeError(
                 "Refusing to place order. Set IB_ALLOW_ORDER=true only for paper testing."
             )
 
-        self.require_paper_account(account)
+        self.require_trading_account(
+            account,
+            strategy_capital_limit=strategy_capital_limit,
+            require_cap=True,
+        )
         order = make_limit_order(account, action, quantity, limit_price, tif, order_ref)
         trade = self.ib.placeOrder(contract, order)
         self.ib.sleep(1)
@@ -603,3 +638,7 @@ def ib_number_or_none(value: object) -> object:
 
 def sorted_rows(rows: Iterable[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: str(row.get(key, "")))
+
+
+def is_paper_account(account: str) -> bool:
+    return account.startswith("DU")
