@@ -19,7 +19,7 @@ from .leaps_strategy import (
     daily_order_usage,
     total_open_order_value,
 )
-from .live_state import ManagedOptionPosition, StateStore, today_iso
+from .live_state import ManagedOptionPosition, StateStore, TERMINAL_ORDER_STATES, today_iso
 from .models import Quote, ThresholdDecision
 from .sqlite_state import SQLiteStateStore, migrate_json_state_to_sqlite
 from .strategy import evaluate_threshold
@@ -195,6 +195,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_leaps_state_args(bot_orders)
     bot_orders.set_defaults(handler=cmd_bot_orders)
+
+    resolve_order = subparsers.add_parser(
+        "resolve-order",
+        help="Manually resolve a bot order after operator verification.",
+    )
+    add_leaps_state_args(resolve_order)
+    resolve_order.add_argument("--order-id", type=int, required=True)
+    resolve_order.add_argument(
+        "--state",
+        choices=tuple(sorted(TERMINAL_ORDER_STATES)),
+        required=True,
+        help="Verified terminal lifecycle state.",
+    )
+    resolve_order.add_argument(
+        "--note",
+        default="resolved by operator",
+        help="Resolution note recorded in bot state and journal.",
+    )
+    resolve_order.set_defaults(handler=cmd_resolve_order)
 
     bot_positions = subparsers.add_parser(
         "bot-positions",
@@ -570,6 +589,41 @@ def cmd_bot_orders(settings: Settings, args: argparse.Namespace) -> dict[str, An
     }
 
 
+def cmd_resolve_order(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    store = load_leaps_state_store(settings, args, config)
+    state = store.load()
+    order = find_order(state.pending_orders, args.order_id)
+    source = "pending_orders"
+    if order is None:
+        order = find_order(state.completed_orders, args.order_id)
+        source = "completed_orders"
+    if order is None:
+        raise ValueError(f"Order {args.order_id} was not found in bot state.")
+
+    order.transition_to(args.state, broker_status=f"OperatorResolved:{args.state}", note=args.note)
+    if order.cleared_date is None:
+        order.cleared_date = today_iso()
+    if args.state in {"cancelled", "expired", "rejected"}:
+        order.remaining = 0.0
+
+    if source == "pending_orders":
+        state.pending_orders = [
+            item for item in state.pending_orders
+            if item.order_id != args.order_id
+        ]
+        state.completed_orders.append(order)
+
+    store.save(state)
+    payload = {"order": asdict(order), "source": source}
+    store.record_event("resolve-order", payload)
+    return {
+        "statePath": str(store.state_path),
+        "resolved": asdict(order),
+        "source": source,
+    }
+
+
 def cmd_bot_positions(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     config = load_leaps_config(args)
     store = load_leaps_state_store(settings, args, config)
@@ -876,6 +930,13 @@ def find_position(
             return position
         if local_symbol and position.local_symbol == local_symbol:
             return position
+    return None
+
+
+def find_order(orders: list[Any], order_id: int) -> Any | None:
+    for order in orders:
+        if order.order_id == order_id:
+            return order
     return None
 
 

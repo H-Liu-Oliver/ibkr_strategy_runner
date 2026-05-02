@@ -5,7 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ibkr_strategy_runner.cli import cmd_doctor, cmd_fills, cmd_journal, cmd_risk, cmd_status
+from ibkr_strategy_runner.cli import (
+    cmd_doctor,
+    cmd_fills,
+    cmd_journal,
+    cmd_resolve_order,
+    cmd_risk,
+    cmd_status,
+)
 from ibkr_strategy_runner.config import Settings
 from ibkr_strategy_runner.live_state import ManagedOrder, StateStore, StrategyState
 
@@ -145,6 +152,27 @@ class OperatorCommandTest(unittest.TestCase):
             self.assertEqual(statuses["ibkr"], "skipped")
             self.assertEqual(statuses["state"], "ok")
             self.assertEqual(statuses["service"], "ok")
+
+    def test_resolve_order_marks_unknown_completed_order_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seed_state(Path(tmp))
+
+            result = cmd_resolve_order(
+                make_settings(),
+                make_args(
+                    Path(tmp),
+                    order_id=3,
+                    state="cancelled",
+                    note="verified cancelled in IBKR",
+                ),
+            )
+
+            status = cmd_status(make_settings(), make_args(Path(tmp)))
+            journal = cmd_journal(make_settings(), make_args(Path(tmp), limit=1))
+            self.assertEqual(result["resolved"]["lifecycle_state"], "cancelled")
+            self.assertEqual(status["unknownCompletedOrderCount"], 0)
+            self.assertFalse(status["needsAttention"])
+            self.assertEqual(journal["events"][0]["event"], "resolve-order")
 
 
 if __name__ == "__main__":

@@ -500,6 +500,19 @@ ibkr-strategy-runner --json bot-positions \
   --state-dir /home/hliu/.local/state/ibkr-strategy-runner
 ```
 
+If an order was handled manually in IBKR and reconciliation marks it `unknown`,
+verify the order in IBKR first, then resolve it explicitly:
+
+```bash
+ibkr-strategy-runner --json resolve-order \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+  --state-backend sqlite \
+  --order-id 9 \
+  --state cancelled \
+  --note "verified cancelled in IBKR"
+```
+
 Recent journal events and recorded fills:
 
 ```bash
