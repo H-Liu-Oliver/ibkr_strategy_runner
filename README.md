@@ -69,6 +69,49 @@ Or add the venv `bin` directory to `PATH` in `~/.zshrc`:
 export PATH=/path/to/ibkr_strategy_runner/.venv/bin:$PATH
 ```
 
+## Path Setup
+
+The examples use placeholders so they can be copied safely. Set these paths once
+for your machine, then reuse them in the commands below:
+
+```bash
+PROJECT_DIR=/path/to/ibkr_strategy_runner
+PY="$PROJECT_DIR/.venv/bin/python"
+STATE_PAPER="$HOME/.local/state/ibkr-strategy-runner-paper"
+STATE_REAL="$HOME/.local/state/ibkr-strategy-runner-real"
+UNIT_PAPER="$HOME/.config/systemd/user/ibkr-strategy-runner-leaps.service"
+UNIT_REAL="$HOME/.config/systemd/user/ibkr-strategy-runner-leaps-real.service"
+```
+
+Run these assignments in the same shell before using the examples, or add them
+to your shell profile.
+
+Replace `/path/to/ibkr_strategy_runner` with the directory where this repository
+is cloned. Replace `your-paper-account-id` and `your-live-account-id` with the
+account IDs shown by IBKR.
+
+Use separate state directories for paper and real accounts. The state directory
+contains the bot's durable memory: cycle dates, pending orders, completed orders,
+fills, and managed positions. Reusing the same state directory for paper and
+real accounts can make reconciliation ambiguous.
+
+In shell commands, `$HOME` and `~` both refer to your home directory. In raw
+systemd unit files, prefer `%h` for the user's home directory because systemd
+does not expand `~` in every field the same way a shell does. The recommended
+path is to use:
+
+```bash
+ibkr-strategy-runner service install ...
+```
+
+That command writes a service file from the paths you pass with `--python`,
+`--working-directory`, `--env-file`, `--config`, and `--state-dir`, which avoids
+editing a unit file by hand.
+
+The README commands pass `--state-dir` explicitly. Keep doing that for operator
+commands and services so the selected paper or real state directory is obvious
+at the command line.
+
 ## Configure IBKR Access
 
 The CLI loads environment variables from:
@@ -293,7 +336,7 @@ Run the built-in health check:
 ```bash
 ibkr-strategy-runner --env-file .env.paper --json doctor \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -540,7 +583,7 @@ decision, and writes bot state, but does not submit IBKR orders:
 ```bash
 ibkr-strategy-runner --env-file .env.paper --json --debug leaps-once \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --force
 ```
@@ -571,7 +614,7 @@ Submit paper orders only after dry-run output is understood:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json --debug leaps-once \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --execute \
   --force
@@ -584,7 +627,7 @@ ibkr-strategy-runner --env-file .env.paper-trade open-orders
 ibkr-strategy-runner --env-file .env.paper-trade positions
 ibkr-strategy-runner --env-file .env.paper-trade --json ops \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -592,16 +635,14 @@ Install the paper service only after the one-shot paper execution path behaves
 as expected:
 
 ```bash
-PY=/path/to/ibkr_strategy_runner/.venv/bin/python
-WORKDIR=/path/to/ibkr_strategy_runner
-
-ibkr-strategy-runner --env-file "$WORKDIR/.env.paper-trade" --account your-paper-account-id service install \
-  --config "$WORKDIR/configs-QQQ.paper.json" \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+ibkr-strategy-runner --env-file "$PROJECT_DIR/.env.paper-trade" --account your-paper-account-id service install \
+  --unit-path "$UNIT_PAPER" \
+  --config "$PROJECT_DIR/configs-QQQ.paper.json" \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --execute \
   --python "$PY" \
-  --working-directory "$WORKDIR" \
+  --working-directory "$PROJECT_DIR" \
   --now
 ```
 
@@ -612,7 +653,7 @@ ibkr-strategy-runner service status
 ibkr-strategy-runner service logs --since "today" --lines 200
 ibkr-strategy-runner --env-file .env.paper-trade --json ops \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -631,7 +672,7 @@ ibkr-strategy-runner service stop
 
 ibkr-strategy-runner --env-file .env.paper --json ops \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 
 ibkr-strategy-runner --env-file .env.paper open-orders
@@ -646,12 +687,12 @@ Stage the real account in dry-run mode first:
 ```bash
 ibkr-strategy-runner --env-file .env.real --json doctor \
   --config configs-QQQ.real.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-dir "$STATE_REAL" \
   --state-backend sqlite
 
 ibkr-strategy-runner --env-file .env.real --json --debug leaps-once \
   --config configs-QQQ.real.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-dir "$STATE_REAL" \
   --state-backend sqlite \
   --force
 ```
@@ -675,7 +716,7 @@ Real-account execution example:
 ```bash
 ibkr-strategy-runner --env-file .env.real-live --json --debug leaps-once \
   --config configs-QQQ.real.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-dir "$STATE_REAL" \
   --state-backend sqlite \
   --execute \
   --force
@@ -684,18 +725,15 @@ ibkr-strategy-runner --env-file .env.real-live --json --debug leaps-once \
 Real-account service install example using a separate service name:
 
 ```bash
-PY=/path/to/ibkr_strategy_runner/.venv/bin/python
-WORKDIR=/path/to/ibkr_strategy_runner
-
-ibkr-strategy-runner --env-file "$WORKDIR/.env.real-live" --account your-live-account-id service install \
+ibkr-strategy-runner --env-file "$PROJECT_DIR/.env.real-live" --account your-live-account-id service install \
   --name ibkr-strategy-runner-leaps-real.service \
-  --unit-path ~/.config/systemd/user/ibkr-strategy-runner-leaps-real.service \
-  --config "$WORKDIR/configs-QQQ.real.json" \
-  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --unit-path "$UNIT_REAL" \
+  --config "$PROJECT_DIR/configs-QQQ.real.json" \
+  --state-dir "$STATE_REAL" \
   --state-backend sqlite \
   --execute \
   --python "$PY" \
-  --working-directory "$WORKDIR" \
+  --working-directory "$PROJECT_DIR" \
   --now
 ```
 
@@ -706,9 +744,9 @@ ibkr-strategy-runner service status --name ibkr-strategy-runner-leaps-real.servi
 ibkr-strategy-runner service logs --name ibkr-strategy-runner-leaps-real.service --since "today" --lines 200
 ibkr-strategy-runner --env-file .env.real-live --json ops \
   --name ibkr-strategy-runner-leaps-real.service \
-  --unit-path ~/.config/systemd/user/ibkr-strategy-runner-leaps-real.service \
+  --unit-path "$UNIT_REAL" \
   --config configs-QQQ.real.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-dir "$STATE_REAL" \
   --state-backend sqlite
 ```
 
@@ -729,7 +767,7 @@ Run the daemon manually only for testing:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json run-leaps \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --execute
 ```
@@ -738,16 +776,14 @@ Use the `service` command group for normal background operation. The same
 command can install or refresh the service after changing env/config paths:
 
 ```bash
-PY=/path/to/ibkr_strategy_runner/.venv/bin/python
-WORKDIR=/path/to/ibkr_strategy_runner
-
-ibkr-strategy-runner --env-file "$WORKDIR/.env.paper-trade" --account your-paper-account-id service install \
-  --config "$WORKDIR/configs-QQQ.paper.json" \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+ibkr-strategy-runner --env-file "$PROJECT_DIR/.env.paper-trade" --account your-paper-account-id service install \
+  --unit-path "$UNIT_PAPER" \
+  --config "$PROJECT_DIR/configs-QQQ.paper.json" \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --execute \
   --python "$PY" \
-  --working-directory "$WORKDIR" \
+  --working-directory "$PROJECT_DIR" \
   --now
 ```
 
@@ -777,7 +813,7 @@ One-command operator dashboard:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json ops \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -794,12 +830,12 @@ Bot state and journal:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json leaps-state \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 
 ibkr-strategy-runner --env-file .env.paper-trade --json journal \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --limit 50
 ```
@@ -809,11 +845,11 @@ SQLite state is available for live auditability:
 ```bash
 ibkr-strategy-runner --env-file .env.paper --json migrate-state-sqlite \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper
+  --state-dir "$STATE_PAPER"
 
 ibkr-strategy-runner --env-file .env.paper-trade --json status \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -826,22 +862,22 @@ Bot-owned orders and managed positions:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json status \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 
 ibkr-strategy-runner --env-file .env.paper-trade --json risk \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 
 ibkr-strategy-runner --env-file .env.paper-trade --json bot-orders \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 
 ibkr-strategy-runner --env-file .env.paper-trade --json bot-positions \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -851,7 +887,7 @@ verify the order in IBKR first, then resolve it explicitly:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json resolve-order \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --order-id 9 \
   --state cancelled \
@@ -863,13 +899,13 @@ Recent journal events and recorded fills:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json journal \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --limit 20
 
 ibkr-strategy-runner --env-file .env.paper-trade --json fills \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -878,7 +914,7 @@ Environment/config/service health check:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json doctor \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
@@ -921,7 +957,7 @@ To explicitly let the bot manage an existing option position, import it:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade import-position \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --con-id 123456789 \
   --local-symbol "QQQ  270115C00500000" \
@@ -938,7 +974,7 @@ To stop the bot from managing a persisted position:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade quarantine-position \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite \
   --con-id 123456789
 ```
@@ -950,7 +986,7 @@ Run reconciliation after IB Gateway/TWS pauses, reconnects, or restarts:
 ```bash
 ibkr-strategy-runner --env-file .env.paper-trade --json leaps-reconcile \
   --config configs-QQQ.paper.json \
-  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-dir "$STATE_PAPER" \
   --state-backend sqlite
 ```
 
