@@ -8,18 +8,18 @@ against paper first, then a tightly capped real account.
 Install or refresh the user service:
 
 ```bash
-PY=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.venv/bin/python
-ENV=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.env
-CONFIG=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/configs-QQQ.json
-STATE_DIR=/home/hliu/.local/state/ibkr-strategy-runner
+PY=/path/to/ibkr_strategy_runner/.venv/bin/python
+ENV=/path/to/ibkr_strategy_runner/.env
+CONFIG=/path/to/ibkr_strategy_runner/configs-QQQ.json
+STATE_DIR=~/.local/state/ibkr-strategy-runner
 
-$PY -m ibkr_strategy_runner --env-file "$ENV" --account DUO585078 service install \
+$PY -m ibkr_strategy_runner --env-file "$ENV" --account your-paper-account-id service install \
   --config "$CONFIG" \
   --state-dir "$STATE_DIR" \
   --state-backend sqlite \
   --execute \
   --python "$PY" \
-  --working-directory /home/hliu/proj/trading/ibkr/ibkr_strategy_runner \
+  --working-directory /path/to/ibkr_strategy_runner \
   --now
 ```
 
@@ -93,8 +93,8 @@ State and journal files are the bot's durable memory. Back them up before
 real-account rollout, before config changes, and after any manual recovery.
 
 ```bash
-STATE_DIR=/home/hliu/.local/state/ibkr-strategy-runner
-BACKUP_DIR=/home/hliu/.local/state/ibkr-strategy-runner-backups
+STATE_DIR=~/.local/state/ibkr-strategy-runner
+BACKUP_DIR=~/.local/state/ibkr-strategy-runner-backups
 mkdir -p "$BACKUP_DIR"
 tar -C "$STATE_DIR" -czf "$BACKUP_DIR/state-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" .
 ```
@@ -127,11 +127,11 @@ After manual intervention, reconcile before restarting:
 ```bash
 ibkr-strategy-runner --json leaps-reconcile \
   --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+  --state-dir ~/.local/state/ibkr-strategy-runner
 
 ibkr-strategy-runner --json doctor \
   --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+  --state-dir ~/.local/state/ibkr-strategy-runner
 ```
 
 Restart only when `doctor`, `status`, `bot-orders`, IBKR `open-orders`, and

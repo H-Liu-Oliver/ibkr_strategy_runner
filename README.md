@@ -1,6 +1,6 @@
 # ibkr-strategy-runner
 
-`ibkr-strategy-runner` is a small IBKR paper-trading CLI and long-running strategy daemon.
+`ibkr-strategy-runner` is a small IBKR strategy CLI and long-running trading daemon.
 It grew out of the smoke tests in `../smoke` and reuses the same validated IBKR
 API flows: connect, account summary, market data, what-if/order submission, open
 orders, and positions.
@@ -12,7 +12,9 @@ The main automated strategy is a persistent QQQ LEAPS overlay:
 - Reconcile open orders and positions after restarts or IBKR reconnects.
 - Store bot state and an append-only journal so operation can resume.
 
-This project is currently designed for **IBKR paper accounts**.
+This project is designed to be used **paper first**. Real-account execution is
+supported only behind explicit live-trading guards, hard capital caps, and a
+manual cutover checklist.
 
 ## Safety Model
 
@@ -34,21 +36,40 @@ The CLI intentionally has several trade guards:
 The service supervises the Python trading process only. IB Gateway or TWS must
 also be running and logged in separately.
 
-## Install
+## Install And First Run
 
-From this directory:
+Use a project virtualenv so the direct `ibkr-strategy-runner` command is
+available without typing `python -m ...`.
 
 ```bash
+cd /path/to/ibkr_strategy_runner
+python -m venv .venv
+source .venv/bin/activate
 python -m pip install -e .
+ibkr-strategy-runner --help
 ```
 
-Or use the existing smoke virtualenv directly:
+If the package is already installed in the project virtualenv, you can call it
+directly:
 
 ```bash
-/home/hliu/proj/trading/ibkr/smoke/.venv/bin/python -m ibkr_strategy_runner --help
+/path/to/ibkr_strategy_runner/.venv/bin/ibkr-strategy-runner --help
 ```
 
-## Environment
+To make the command available in a shell session:
+
+```bash
+source /path/to/ibkr_strategy_runner/.venv/bin/activate
+ibkr-strategy-runner --help
+```
+
+Or add the venv `bin` directory to `PATH` in `~/.zshrc`:
+
+```bash
+export PATH=/path/to/ibkr_strategy_runner/.venv/bin:$PATH
+```
+
+## Configure IBKR Access
 
 The CLI loads environment variables from:
 
@@ -60,6 +81,15 @@ Example:
 
 ```bash
 cp .env.example .env
+```
+
+For the profile workflow below, create explicit files:
+
+```bash
+cp .env.example .env.paper
+cp .env.example .env.paper-trade
+cp .env.example .env.real
+cp .env.example .env.real-live
 ```
 
 Important variables:
@@ -74,41 +104,203 @@ IB_ALLOW_LIVE_TRADING=false
 IB_LIVE_ACCOUNT_ALLOWLIST=
 IB_DEFAULT_EXCHANGE=SMART
 IB_DEFAULT_CURRENCY=USD
-IBKR_STRATEGY_RUNNER_STATE_DIR=/home/hliu/.local/state/ibkr-strategy-runner
+IBKR_STRATEGY_RUNNER_STATE_DIR=~/.local/state/ibkr-strategy-runner
 ```
 
+Keep separate env files for paper and real accounts. This makes account
+switching explicit and avoids silently reusing the wrong account. When
+`--env-file` is passed, values in that file are loaded directly; do not rely on
+shell prefixes to override values that are already set in the file.
+
+Paper account example, `.env.paper`:
+
+```bash
+IB_HOST=127.0.0.1
+IB_PORT=4002
+IB_CLIENT_ID=201
+IB_ACCOUNT=your-paper-account-id
+IB_ALLOW_ORDER=false
+IB_ALLOW_LIVE_TRADING=false
+IB_LIVE_ACCOUNT_ALLOWLIST=
+IB_DEFAULT_EXCHANGE=SMART
+IB_DEFAULT_CURRENCY=USD
+IBKR_STRATEGY_RUNNER_STATE_DIR=~/.local/state/ibkr-strategy-runner-paper
+IBKR_STRATEGY_RUNNER_STATE_BACKEND=sqlite
+```
+
+Paper order-submission profile, `.env.paper-trade`:
+
+```bash
+IB_HOST=127.0.0.1
+IB_PORT=4002
+IB_CLIENT_ID=201
+IB_ACCOUNT=your-paper-account-id
+IB_ALLOW_ORDER=true
+IB_ALLOW_LIVE_TRADING=false
+IB_LIVE_ACCOUNT_ALLOWLIST=
+IB_DEFAULT_EXCHANGE=SMART
+IB_DEFAULT_CURRENCY=USD
+IBKR_STRATEGY_RUNNER_STATE_DIR=~/.local/state/ibkr-strategy-runner-paper
+IBKR_STRATEGY_RUNNER_STATE_BACKEND=sqlite
+```
+
+Real account dry-run profile, `.env.real`:
+
+```bash
+IB_HOST=127.0.0.1
+IB_PORT=4001
+IB_CLIENT_ID=301
+IB_ACCOUNT=your-live-account-id
+IB_ALLOW_ORDER=false
+IB_ALLOW_LIVE_TRADING=false
+IB_LIVE_ACCOUNT_ALLOWLIST=your-live-account-id
+IB_DEFAULT_EXCHANGE=SMART
+IB_DEFAULT_CURRENCY=USD
+IBKR_STRATEGY_RUNNER_STATE_DIR=~/.local/state/ibkr-strategy-runner-real
+IBKR_STRATEGY_RUNNER_STATE_BACKEND=sqlite
+```
+
+Real order-submission profile, `.env.real-live`:
+
+```bash
+IB_HOST=127.0.0.1
+IB_PORT=4001
+IB_CLIENT_ID=301
+IB_ACCOUNT=your-live-account-id
+IB_ALLOW_ORDER=true
+IB_ALLOW_LIVE_TRADING=true
+IB_LIVE_ACCOUNT_ALLOWLIST=your-live-account-id
+IB_DEFAULT_EXCHANGE=SMART
+IB_DEFAULT_CURRENCY=USD
+IBKR_STRATEGY_RUNNER_STATE_DIR=~/.local/state/ibkr-strategy-runner-real
+IBKR_STRATEGY_RUNNER_STATE_BACKEND=sqlite
+```
+
+For IB Gateway, `4002` is commonly used for paper and `4001` for live. For TWS,
+the common defaults are different; use the port configured in TWS/Gateway API
+settings.
+
 Use `IB_ALLOW_ORDER=false` for setup and dry runs. Set it to `true` only when
-you intentionally want paper orders submitted.
+you intentionally want the selected account to receive orders.
 
 For real accounts, keep `IB_ALLOW_LIVE_TRADING=false` until the live-account
 readiness checklist in `docs/live_account_roadmap.md` is complete. A real
 account must also be listed in `IB_LIVE_ACCOUNT_ALLOWLIST`, and strategy
 execution requires a hard `strategy_capital_limit`.
 
+## Configure Strategy Files
+
+Use `examples/leaps-overlay.example.json` as a template. Keep personal configs
+such as `configs-QQQ.paper.json`, `configs-QQQ.real.json`, and
+`configs-QQQ.json` local; they are ignored by Git because they can contain
+account-specific sizing and risk choices.
+
+Create a paper config:
+
+```bash
+cp examples/leaps-overlay.example.json configs-QQQ.paper.json
+```
+
+Example paper sizing:
+
+```json
+{
+  "symbol": "QQQ",
+  "primary_exchange": "NASDAQ",
+  "capital_base": "net_liquidation",
+  "strategy_capital_limit": 500000,
+  "buying_power_fraction": null,
+  "equity_allocation": 0.7,
+  "option_allocation": 0.25,
+  "cash_buffer_allocation": 0.05,
+  "dca_months": 14.0,
+  "signal_drop": -0.01,
+  "target_delta": 0.6,
+  "dte_days": 540,
+  "trade_fraction": 0.0125,
+  "max_positions": 5,
+  "stale_order_policy": "leave_until_expired",
+  "max_single_order_value": 10000,
+  "max_daily_order_count": 2,
+  "max_daily_notional": 15000,
+  "max_total_open_order_value": 20000,
+  "max_stock_position_value": 350000,
+  "max_option_position_value": 125000,
+  "max_option_bid_ask_spread_pct": 0.08
+}
+```
+
+Create a separate real-account config with a much smaller initial cap:
+
+```bash
+cp examples/leaps-overlay.example.json configs-QQQ.real.json
+```
+
+Example real-account starter sizing:
+
+```json
+{
+  "symbol": "QQQ",
+  "primary_exchange": "NASDAQ",
+  "capital_base": "net_liquidation",
+  "strategy_capital_limit": 25000,
+  "buying_power_fraction": null,
+  "equity_allocation": 0.7,
+  "option_allocation": 0.25,
+  "cash_buffer_allocation": 0.05,
+  "dca_months": 14.0,
+  "signal_drop": -0.01,
+  "target_delta": 0.6,
+  "dte_days": 540,
+  "trade_fraction": 0.0125,
+  "max_positions": 1,
+  "stale_order_policy": "leave_until_expired",
+  "max_single_order_value": 1000,
+  "max_daily_order_count": 1,
+  "max_daily_notional": 1000,
+  "max_total_open_order_value": 1000,
+  "max_stock_position_value": 17500,
+  "max_option_position_value": 6250,
+  "max_option_bid_ask_spread_pct": 0.05
+}
+```
+
+The real-account example intentionally starts small. Increase limits only after
+paper behavior, reconciliation, service restart behavior, and manual recovery
+have all been verified.
+
 ## Basic Checks
 
 With IB Gateway/TWS running:
 
 ```bash
-ibkr-strategy-runner connect
-ibkr-strategy-runner account
-ibkr-strategy-runner positions
-ibkr-strategy-runner open-orders
-ibkr-strategy-runner quote QQQ --primary-exchange NASDAQ
+ibkr-strategy-runner --env-file .env.paper connect
+ibkr-strategy-runner --env-file .env.paper account
+ibkr-strategy-runner --env-file .env.paper positions
+ibkr-strategy-runner --env-file .env.paper open-orders
+ibkr-strategy-runner --env-file .env.paper quote QQQ --primary-exchange NASDAQ
 ```
 
 Use `--json` before the command for machine-readable output:
 
 ```bash
-ibkr-strategy-runner --json account
-ibkr-strategy-runner --json open-orders
+ibkr-strategy-runner --env-file .env.paper --json account
+ibkr-strategy-runner --env-file .env.paper --json open-orders
+```
+
+Run the built-in health check:
+
+```bash
+ibkr-strategy-runner --env-file .env.paper --json doctor \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 ```
 
 ## Strategy Config
 
-Use `examples/leaps-overlay.example.json` as a template. Keep personal configs
-such as `configs-QQQ.json` local; they are ignored by Git because they can
-contain account-specific sizing and risk choices.
+The LEAPS config controls symbol, capital base, allocation targets, signal
+thresholds, stale order policy, and risk limits.
 
 Core fields:
 
@@ -340,14 +532,16 @@ does not currently model taxes, dividends, slippage, portfolio margin effects,
 assignment/exercise workflows, or cross-symbol diversification. It also does not
 use buying power by default; using buying power requires explicit config.
 
-## Dry Run
+## Paper Account Workflow
 
-Run one strategy cycle without placing orders:
+Start in dry-run mode. This connects to the paper account, computes the strategy
+decision, and writes bot state, but does not submit IBKR orders:
 
 ```bash
-IB_ALLOW_ORDER=false ibkr-strategy-runner --json --debug leaps-once \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper --json --debug leaps-once \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
   --force
 ```
 
@@ -363,8 +557,8 @@ Dry runs should not create IBKR orders.
 Explain today's historical-data signal without touching state:
 
 ```bash
-ibkr-strategy-runner --json leaps-explain \
-  --config configs-QQQ.json
+ibkr-strategy-runner --env-file .env.paper --json leaps-explain \
+  --config configs-QQQ.paper.json
 ```
 
 `leaps-explain` uses the same `LeapsStrategyConfig` model and historical-bar
@@ -372,14 +566,13 @@ signal logic as live execution. It intentionally does not model live-only
 behavior such as account sizing, current quote availability, option-chain
 selection, order routing, fills, commissions, or broker rejections.
 
-## Paper Execution
-
 Submit paper orders only after dry-run output is understood:
 
 ```bash
-IB_ALLOW_ORDER=true ibkr-strategy-runner --json --debug leaps-once \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade --json --debug leaps-once \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
   --execute \
   --force
 ```
@@ -387,41 +580,174 @@ IB_ALLOW_ORDER=true ibkr-strategy-runner --json --debug leaps-once \
 Then inspect:
 
 ```bash
-ibkr-strategy-runner open-orders
-ibkr-strategy-runner positions
-ibkr-strategy-runner --json leaps-state \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade open-orders
+ibkr-strategy-runner --env-file .env.paper-trade positions
+ibkr-strategy-runner --env-file .env.paper-trade --json ops \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
+```
+
+Install the paper service only after the one-shot paper execution path behaves
+as expected:
+
+```bash
+PY=/path/to/ibkr_strategy_runner/.venv/bin/python
+WORKDIR=/path/to/ibkr_strategy_runner
+
+ibkr-strategy-runner --env-file "$WORKDIR/.env.paper-trade" --account your-paper-account-id service install \
+  --config "$WORKDIR/configs-QQQ.paper.json" \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
+  --execute \
+  --python "$PY" \
+  --working-directory "$WORKDIR" \
+  --now
+```
+
+Monitor the paper service:
+
+```bash
+ibkr-strategy-runner service status
+ibkr-strategy-runner service logs --since "today" --lines 200
+ibkr-strategy-runner --env-file .env.paper-trade --json ops \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
+```
+
+## Switching Between Paper And Real Accounts
+
+The safest switch is explicit: stop the current daemon, verify state, change the
+env file and config, run health checks, then install/start the service with the
+new profile. Do not leave a paper and real daemon running against the same
+strategy unless you deliberately use separate service names, configs, and state
+directories.
+
+Before switching away from paper:
+
+```bash
+ibkr-strategy-runner service stop
+
+ibkr-strategy-runner --env-file .env.paper --json ops \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
+
+ibkr-strategy-runner --env-file .env.paper open-orders
+ibkr-strategy-runner --env-file .env.paper positions
+```
+
+Only continue when paper `ops` has no unknown completed orders and IBKR open
+orders match what you expect.
+
+Stage the real account in dry-run mode first:
+
+```bash
+ibkr-strategy-runner --env-file .env.real --json doctor \
+  --config configs-QQQ.real.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-backend sqlite
+
+ibkr-strategy-runner --env-file .env.real --json --debug leaps-once \
+  --config configs-QQQ.real.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-backend sqlite \
+  --force
+```
+
+At this point the real account still cannot receive orders because `.env.real`
+has `IB_ALLOW_ORDER=false` and `IB_ALLOW_LIVE_TRADING=false`.
+
+To place real-account orders, all of these must be true:
+
+- `.env.real` has `IB_ACCOUNT=<real account id>`.
+- `.env.real-live` has `IB_ALLOW_ORDER=true`.
+- `.env.real-live` has `IB_ALLOW_LIVE_TRADING=true`.
+- `.env.real-live` includes the account in `IB_LIVE_ACCOUNT_ALLOWLIST`.
+- `configs-QQQ.real.json` has a non-null `strategy_capital_limit`.
+- `configs-QQQ.real.json` has conservative risk limits.
+- The latest `doctor`, `ops`, `open-orders`, and `positions` checks match the
+  intended real-account state.
+
+Real-account execution example:
+
+```bash
+ibkr-strategy-runner --env-file .env.real-live --json --debug leaps-once \
+  --config configs-QQQ.real.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-backend sqlite \
+  --execute \
+  --force
+```
+
+Real-account service install example using a separate service name:
+
+```bash
+PY=/path/to/ibkr_strategy_runner/.venv/bin/python
+WORKDIR=/path/to/ibkr_strategy_runner
+
+ibkr-strategy-runner --env-file "$WORKDIR/.env.real-live" --account your-live-account-id service install \
+  --name ibkr-strategy-runner-leaps-real.service \
+  --unit-path ~/.config/systemd/user/ibkr-strategy-runner-leaps-real.service \
+  --config "$WORKDIR/configs-QQQ.real.json" \
+  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-backend sqlite \
+  --execute \
+  --python "$PY" \
+  --working-directory "$WORKDIR" \
+  --now
+```
+
+Check the real-account service:
+
+```bash
+ibkr-strategy-runner service status --name ibkr-strategy-runner-leaps-real.service
+ibkr-strategy-runner service logs --name ibkr-strategy-runner-leaps-real.service --since "today" --lines 200
+ibkr-strategy-runner --env-file .env.real-live --json ops \
+  --name ibkr-strategy-runner-leaps-real.service \
+  --unit-path ~/.config/systemd/user/ibkr-strategy-runner-leaps-real.service \
+  --config configs-QQQ.real.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-real \
+  --state-backend sqlite
+```
+
+To switch back to paper, stop the real service first and restart the paper
+service:
+
+```bash
+ibkr-strategy-runner service stop --name ibkr-strategy-runner-leaps-real.service
+ibkr-strategy-runner service start
 ```
 
 ## Long-Running Service
 
 Operational checklist: [docs/operator_runbook.md](docs/operator_runbook.md).
 
-The daemon command:
+Run the daemon manually only for testing:
 
 ```bash
-ibkr-strategy-runner --json run-leaps \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade --json run-leaps \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
   --execute
 ```
 
-Install or refresh the user `systemd` service:
+Use the `service` command group for normal background operation. The same
+command can install or refresh the service after changing env/config paths:
 
 ```bash
-PY=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.venv/bin/python
-ENV=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.env
-CONFIG=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/configs-QQQ.json
-STATE=/home/hliu/.local/state/ibkr-strategy-runner
+PY=/path/to/ibkr_strategy_runner/.venv/bin/python
+WORKDIR=/path/to/ibkr_strategy_runner
 
-$PY -m ibkr_strategy_runner --env-file "$ENV" --account DUO585078 service install \
-  --config "$CONFIG" \
-  --state-dir "$STATE" \
+ibkr-strategy-runner --env-file "$WORKDIR/.env.paper-trade" --account your-paper-account-id service install \
+  --config "$WORKDIR/configs-QQQ.paper.json" \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
   --state-backend sqlite \
   --execute \
   --python "$PY" \
-  --working-directory /home/hliu/proj/trading/ibkr/ibkr_strategy_runner \
+  --working-directory "$WORKDIR" \
   --now
 ```
 
@@ -429,20 +755,6 @@ After editing Python code:
 
 ```bash
 ibkr-strategy-runner service restart
-```
-
-After editing service settings, run `service install` again with the intended
-arguments and `--now`.
-
-```bash
-ibkr-strategy-runner --env-file "$ENV" --account DUO585078 service install \
-  --config "$CONFIG" \
-  --state-dir "$STATE" \
-  --state-backend sqlite \
-  --execute \
-  --python "$PY" \
-  --working-directory /home/hliu/proj/trading/ibkr/ibkr_strategy_runner \
-  --now
 ```
 
 Show the exact service command:
@@ -463,40 +775,45 @@ ibkr-strategy-runner service logs --since "today" --lines 200
 One-command operator dashboard:
 
 ```bash
-ibkr-strategy-runner --json ops \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade --json ops \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
   --state-backend sqlite
 ```
 
 IBKR account/order status:
 
 ```bash
-ibkr-strategy-runner account
-ibkr-strategy-runner positions
-ibkr-strategy-runner open-orders
+ibkr-strategy-runner --env-file .env.paper-trade account
+ibkr-strategy-runner --env-file .env.paper-trade positions
+ibkr-strategy-runner --env-file .env.paper-trade open-orders
 ```
 
 Bot state and journal:
 
 ```bash
-ibkr-strategy-runner --json leaps-state \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json leaps-state \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 
-tail -n 50 /home/hliu/.local/state/ibkr-strategy-runner/leaps-overlay_*_QQQ.jsonl
+ibkr-strategy-runner --env-file .env.paper-trade --json journal \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
+  --limit 50
 ```
 
 SQLite state is available for live auditability:
 
 ```bash
-ibkr-strategy-runner --json migrate-state-sqlite \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper --json migrate-state-sqlite \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper
 
-ibkr-strategy-runner --json status \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade --json status \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
   --state-backend sqlite
 ```
 
@@ -507,30 +824,34 @@ SQLite state has been reconciled against IBKR.
 Bot-owned orders and managed positions:
 
 ```bash
-ibkr-strategy-runner --json status \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json status \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 
-ibkr-strategy-runner --json risk \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json risk \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 
-ibkr-strategy-runner --json bot-orders \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json bot-orders \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 
-ibkr-strategy-runner --json bot-positions \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json bot-positions \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 ```
 
 If an order was handled manually in IBKR and reconciliation marks it `unknown`,
 verify the order in IBKR first, then resolve it explicitly:
 
 ```bash
-ibkr-strategy-runner --json resolve-order \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade --json resolve-order \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
   --state-backend sqlite \
   --order-id 9 \
   --state cancelled \
@@ -540,22 +861,25 @@ ibkr-strategy-runner --json resolve-order \
 Recent journal events and recorded fills:
 
 ```bash
-ibkr-strategy-runner --json journal \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade --json journal \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
   --limit 20
 
-ibkr-strategy-runner --json fills \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json fills \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 ```
 
 Environment/config/service health check:
 
 ```bash
-ibkr-strategy-runner --json doctor \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json doctor \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 ```
 
 Alerts are emitted as structured log lines for daemon start/stop, cycle
@@ -595,9 +919,10 @@ The daemon only manages option positions persisted in `positions` with
 To explicitly let the bot manage an existing option position, import it:
 
 ```bash
-ibkr-strategy-runner import-position \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade import-position \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
   --con-id 123456789 \
   --local-symbol "QQQ  270115C00500000" \
   --expiry 20270115 \
@@ -611,9 +936,10 @@ ibkr-strategy-runner import-position \
 To stop the bot from managing a persisted position:
 
 ```bash
-ibkr-strategy-runner quarantine-position \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+ibkr-strategy-runner --env-file .env.paper-trade quarantine-position \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite \
   --con-id 123456789
 ```
 
@@ -622,9 +948,10 @@ ibkr-strategy-runner quarantine-position \
 Run reconciliation after IB Gateway/TWS pauses, reconnects, or restarts:
 
 ```bash
-ibkr-strategy-runner --json leaps-reconcile \
-  --config configs-QQQ.json \
-  --state-dir /home/hliu/.local/state/ibkr-strategy-runner
+ibkr-strategy-runner --env-file .env.paper-trade --json leaps-reconcile \
+  --config configs-QQQ.paper.json \
+  --state-dir ~/.local/state/ibkr-strategy-runner-paper \
+  --state-backend sqlite
 ```
 
 This compares persisted bot state with IBKR positions, open orders, and recent
@@ -643,9 +970,9 @@ available again.
 Useful direct commands:
 
 ```bash
-ibkr-strategy-runner what-if QQQ --action BUY --qty 1 --limit 1.00 --primary-exchange NASDAQ
-IB_ALLOW_ORDER=true ibkr-strategy-runner order QQQ --action BUY --qty 1 --limit 1.00 --primary-exchange NASDAQ
-ibkr-strategy-runner cancel --order-id 12345
+ibkr-strategy-runner --env-file .env.paper what-if QQQ --action BUY --qty 1 --limit 1.00 --primary-exchange NASDAQ
+ibkr-strategy-runner --env-file .env.paper-trade order QQQ --action BUY --qty 1 --limit 1.00 --primary-exchange NASDAQ
+ibkr-strategy-runner --env-file .env.paper-trade cancel --order-id 12345
 ```
 
 Use these carefully. Manual orders may not be managed by the LEAPS daemon unless
