@@ -112,6 +112,86 @@ The README commands pass `--state-dir` explicitly. Keep doing that for operator
 commands and services so the selected paper or real state directory is obvious
 at the command line.
 
+## Install And Configure IB Gateway
+
+`ibkr-strategy-runner` connects to IBKR through IB Gateway or TWS. For
+long-running operation, IB Gateway is usually the cleaner choice because it is
+the standalone API gateway and can be supervised separately from this strategy
+service.
+
+Install IB Gateway from IBKR's official download page:
+
+- IB Gateway latest:
+  <https://www.interactivebrokers.com/en/trading/ibgateway-latest.php>
+- IBKR API setup lesson:
+  <https://www.interactivebrokers.com/campus/trading-lessons/installing-configuring-tws-for-the-api/>
+- IBKR TWS API documentation:
+  <https://www.interactivebrokers.com/campus/ibkr-api-page/twsapi-doc/>
+
+Basic setup:
+
+1. Install and launch IB Gateway.
+2. Log in to the intended session: paper for paper testing, live only after
+   real-account readiness is complete.
+3. Open `Configure` -> `Settings` -> `API` -> `Settings`.
+4. Enable socket API access if the setting is shown. IBKR's current Gateway
+   builds may enable this automatically because Gateway exists for API access.
+5. Check the socket port and make it match the env file:
+
+```text
+IB Gateway paper: 4002
+IB Gateway live:  4001
+TWS paper:        7497
+TWS live:         7496
+```
+
+6. For local use, keep `IB_HOST=127.0.0.1`. If the runner is on a different
+   machine from Gateway, configure Gateway networking and trusted IPs carefully
+   before changing `IB_HOST`.
+7. Keep `Read-Only API` enabled while testing connectivity if you want an extra
+   broker-side guard. Uncheck it only when you intentionally want API orders to
+   be accepted. The CLI still also requires `IB_ALLOW_ORDER=true`, and real
+   accounts require the live-trading allowlist gates.
+8. Use a unique `IB_CLIENT_ID` for this runner if other API tools also connect
+   to the same Gateway session.
+9. Apply the settings and restart IB Gateway if Gateway asks for it.
+
+Match the Gateway session to the env profile:
+
+```bash
+# Paper Gateway session
+IB_PORT=4002
+IB_ACCOUNT=your-paper-account-id
+IB_ALLOW_ORDER=false
+
+# Live Gateway session
+IB_PORT=4001
+IB_ACCOUNT=your-live-account-id
+IB_ALLOW_ORDER=false
+IB_ALLOW_LIVE_TRADING=false
+```
+
+Verify Gateway before running the strategy:
+
+```bash
+ibkr-strategy-runner --env-file .env.paper connect
+ibkr-strategy-runner --env-file .env.paper account
+ibkr-strategy-runner --env-file .env.paper open-orders
+ibkr-strategy-runner --env-file .env.paper quote QQQ --primary-exchange NASDAQ
+```
+
+If `connect` fails, check these first:
+
+- Gateway is running and fully logged in.
+- The env file's `IB_PORT` matches Gateway's socket port.
+- No firewall blocks local TCP connections to the Gateway port.
+- `IB_CLIENT_ID` is not already used by another active API client.
+- Gateway is logged into the same paper/live account type as the env profile.
+
+IB Gateway itself is not started by the `ibkr-strategy-runner` systemd service.
+Keep Gateway/TWS running separately. For unattended operation, use IBC or another
+Gateway supervisor, then run this project as a separate strategy service.
+
 ## Configure IBKR Access
 
 The CLI loads environment variables from:
