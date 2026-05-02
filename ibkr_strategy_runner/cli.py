@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -23,6 +24,13 @@ from .live_state import ManagedOptionPosition, StateStore, TERMINAL_ORDER_STATES
 from .models import Quote, ThresholdDecision
 from .sqlite_state import SQLiteStateStore, migrate_json_state_to_sqlite
 from .strategy import evaluate_threshold
+
+
+DEFAULT_SERVICE_NAME = "ibkr-strategy-runner-leaps.service"
+
+
+def default_service_unit_path() -> Path:
+    return Path(f"~/.config/systemd/user/{DEFAULT_SERVICE_NAME}").expanduser()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -287,9 +295,20 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--service-unit",
         type=Path,
-        default=Path("~/.config/systemd/user/ibkr-strategy-runner-leaps.service").expanduser(),
+        default=default_service_unit_path(),
     )
     doctor.set_defaults(handler=cmd_doctor)
+
+    ops = subparsers.add_parser(
+        "ops",
+        help="Show one operator dashboard for service, state, risk, and IBKR status.",
+    )
+    add_leaps_state_args(ops)
+    ops.add_argument("--date", default=today_iso(), help="Market bar date for daily risk usage.")
+    ops.add_argument("--skip-ibkr", action="store_true", help="Do not connect to IBKR.")
+    ops.add_argument("--skip-service", action="store_true", help="Do not call systemctl.")
+    add_service_target_args(ops)
+    ops.set_defaults(handler=cmd_ops)
 
     alert_test = subparsers.add_parser(
         "alert-test",
@@ -331,6 +350,54 @@ def build_parser() -> argparse.ArgumentParser:
     unit.add_argument("--execute", action="store_true", help="Include --execute in ExecStart.")
     unit.set_defaults(handler=cmd_systemd_unit)
 
+    service = subparsers.add_parser(
+        "service",
+        help="Install and manage the user systemd service.",
+    )
+    service_subparsers = service.add_subparsers(dest="service_command", required=True)
+
+    service_install = service_subparsers.add_parser(
+        "install",
+        help="Write or refresh the user systemd unit.",
+    )
+    add_leaps_state_args(service_install)
+    add_service_target_args(service_install)
+    service_install.add_argument(
+        "--python",
+        default=sys.executable,
+        help="Python executable for ExecStart.",
+    )
+    service_install.add_argument(
+        "--working-directory",
+        default=str(Path.cwd()),
+        help="WorkingDirectory for the service.",
+    )
+    service_install.add_argument("--execute", action="store_true", help="Include --execute in ExecStart.")
+    service_install.add_argument("--dry-run", action="store_true", help="Print planned install without writing.")
+    service_install.add_argument(
+        "--now",
+        action="store_true",
+        help="Run daemon-reload and enable --now after writing the unit.",
+    )
+    service_install.set_defaults(handler=cmd_service_install)
+
+    for action in ("start", "stop", "restart", "status", "cat"):
+        service_action = service_subparsers.add_parser(
+            action,
+            help=f"Run systemctl --user {action} for the strategy service.",
+        )
+        service_action.add_argument("--name", default=DEFAULT_SERVICE_NAME)
+        service_action.set_defaults(handler=cmd_service_control)
+
+    service_logs = service_subparsers.add_parser(
+        "logs",
+        help="Show recent journal logs for the strategy service.",
+    )
+    service_logs.add_argument("--name", default=DEFAULT_SERVICE_NAME)
+    service_logs.add_argument("--since", default="1 hour ago")
+    service_logs.add_argument("--lines", type=int, default=100)
+    service_logs.set_defaults(handler=cmd_service_logs)
+
     return parser
 
 
@@ -369,6 +436,16 @@ def add_leaps_args(parser: argparse.ArgumentParser) -> None:
         "--execute",
         action="store_true",
         help="Submit paper orders. Also requires IB_ALLOW_ORDER=true.",
+    )
+
+
+def add_service_target_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--name", default=DEFAULT_SERVICE_NAME, help="User systemd service name.")
+    parser.add_argument(
+        "--unit-path",
+        type=Path,
+        default=default_service_unit_path(),
+        help="Path to the user systemd unit file.",
     )
 
 
@@ -687,6 +764,10 @@ def cmd_status(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     config = load_leaps_config(args)
     store = load_leaps_state_store(settings, args, config)
     state = store.load()
+    return build_status_summary(store, state)
+
+
+def build_status_summary(store: Any, state: Any) -> dict[str, Any]:
     open_positions = state.open_positions()
     unknown_orders = [
         order for order in state.completed_orders
@@ -714,10 +795,19 @@ def cmd_risk(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     config = load_leaps_config(args)
     store = load_leaps_state_store(settings, args, config)
     state = store.load()
-    usage = daily_order_usage(state, args.date)
+    return build_risk_summary(config, store, state, args.date)
+
+
+def build_risk_summary(
+    config: LeapsStrategyConfig,
+    store: Any,
+    state: Any,
+    date: str,
+) -> dict[str, Any]:
+    usage = daily_order_usage(state, date)
     return {
         "statePath": str(store.state_path),
-        "date": args.date,
+        "date": date,
         "usage": {
             "dailyOrderCount": usage["count"],
             "dailyNotional": usage["notional"],
@@ -832,6 +922,68 @@ def cmd_doctor(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     return {"status": overall, "checks": checks}
 
 
+def cmd_ops(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    config.normalized_allocations()
+
+    account = settings.account
+    ibkr_status: dict[str, Any] = {
+        "status": "skipped",
+        "message": "IBKR check skipped",
+    }
+    if not args.skip_ibkr:
+        try:
+            with IBKRClient(settings) as client:
+                account = client.resolve_account()
+                open_orders = sorted_rows(client.open_orders(), "orderId")
+                positions = sorted_rows(client.positions(account), "symbol")
+                ibkr_status = {
+                    "status": "ok",
+                    "account": account,
+                    "openOrderCount": len(open_orders),
+                    "positionCount": len(positions),
+                    "openOrders": open_orders,
+                    "positions": positions,
+                }
+        except Exception as exc:
+            ibkr_status = {
+                "status": "error",
+                "message": str(exc) or exc.__class__.__name__,
+            }
+
+    state_status: dict[str, Any]
+    risk_status: dict[str, Any] | None = None
+    if account:
+        store = make_leaps_state_store(args, config, account)
+        state = store.load()
+        state_status = build_status_summary(store, state)
+        risk_status = build_risk_summary(config, store, state, args.date)
+    else:
+        state_status = {
+            "status": "unavailable",
+            "message": "Set --account or IB_ACCOUNT, or run without --skip-ibkr so the account can be resolved.",
+        }
+
+    service_status = service_snapshot(args.name, args.unit_path, skip=args.skip_service)
+    next_actions = ops_next_actions(state_status, ibkr_status, service_status)
+    overall = ops_overall_status(state_status, ibkr_status, service_status)
+    return {
+        "status": overall,
+        "account": account,
+        "symbol": config.symbol.upper(),
+        "mode": {
+            "allowOrder": settings.allow_order,
+            "allowLiveTrading": settings.allow_live_trading,
+            "stateBackend": args.state_backend,
+        },
+        "service": service_status,
+        "state": state_status,
+        "risk": risk_status,
+        "ibkr": ibkr_status,
+        "nextActions": next_actions,
+    }
+
+
 def cmd_alert_test(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     sink = AlertSink.from_env(webhook_url=args.webhook_url, dry_run=args.dry_run)
     result = sink.emit(
@@ -862,11 +1014,95 @@ def cmd_leaps_example_config(settings: Settings, args: argparse.Namespace) -> di
 
 def cmd_systemd_unit(settings: Settings, args: argparse.Namespace) -> str:
     config = load_leaps_config(args)
-    config_arg = f" --config {args.config}" if args.config else ""
-    execute_arg = " --execute" if args.execute else ""
-    env_arg = f" --env-file {args.env_file}" if args.env_file else ""
+    config.normalized_allocations()
+    return build_systemd_unit_text(settings, args)
+
+
+def cmd_service_install(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    config = load_leaps_config(args)
+    config.normalized_allocations()
+    unit_text = build_systemd_unit_text(settings, args)
+    unit_path = args.unit_path.expanduser()
+
+    result: dict[str, Any] = {
+        "serviceName": args.name,
+        "unitPath": str(unit_path),
+        "dryRun": args.dry_run,
+        "written": False,
+        "unit": unit_text,
+        "commands": [],
+        "nextCommands": [
+            "systemctl --user daemon-reload",
+            f"systemctl --user enable --now {args.name}",
+            f"ibkr-strategy-runner service status --name {args.name}",
+        ],
+    }
+
+    if args.dry_run:
+        return result
+
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(unit_text + "\n")
+    result["written"] = True
+
+    if args.now:
+        commands = [
+            run_external_command(["systemctl", "--user", "daemon-reload"]),
+            run_external_command(["systemctl", "--user", "enable", "--now", args.name]),
+        ]
+        result["commands"] = commands
+        result["nextCommands"] = [f"ibkr-strategy-runner service status --name {args.name}"]
+
+    return result
+
+
+def cmd_service_control(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    if args.service_command == "status":
+        command = ["systemctl", "--user", "--no-pager", "--full", "status", args.name]
+    elif args.service_command == "cat":
+        command = ["systemctl", "--user", "--no-pager", "--full", "cat", args.name]
+    else:
+        command = ["systemctl", "--user", args.service_command, args.name]
+    return {
+        "serviceName": args.name,
+        "action": args.service_command,
+        "result": run_external_command(command, timeout=15),
+    }
+
+
+def cmd_service_logs(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    if args.lines <= 0:
+        raise ValueError("--lines must be positive.")
+    result = run_external_command(
+        [
+            "journalctl",
+            "--user",
+            "-u",
+            args.name,
+            "--since",
+            args.since,
+            "-n",
+            str(args.lines),
+            "--no-pager",
+        ],
+        timeout=15,
+    )
+    return {
+        "serviceName": args.name,
+        "since": args.since,
+        "lines": args.lines,
+        "result": result,
+    }
+
+
+def build_systemd_unit_text(settings: Settings, args: argparse.Namespace) -> str:
+    config_arg = f" --config {args.config}" if getattr(args, "config", None) else ""
+    execute_arg = " --execute" if getattr(args, "execute", False) else ""
+    env_file = getattr(args, "env_file", None)
+    env_arg = f" --env-file {env_file}" if env_file else ""
     account_arg = f" --account {settings.account}" if settings.account else ""
-    backend_arg = f" --state-backend {args.state_backend}" if args.state_backend != "json" else ""
+    state_backend = getattr(args, "state_backend", "json")
+    backend_arg = f" --state-backend {state_backend}" if state_backend != "json" else ""
     command = (
         f"{args.python} -m ibkr_strategy_runner{env_arg}{account_arg} "
         f"run-leaps{config_arg} --state-dir {args.state_dir}{backend_arg}{execute_arg}"
@@ -890,6 +1126,124 @@ def cmd_systemd_unit(settings: Settings, args: argparse.Namespace) -> str:
             "WantedBy=default.target",
         ]
     )
+
+
+def service_snapshot(name: str, unit_path: Path, skip: bool = False) -> dict[str, Any]:
+    expanded_unit_path = unit_path.expanduser()
+    snapshot: dict[str, Any] = {
+        "name": name,
+        "unitPath": str(expanded_unit_path),
+        "unitExists": expanded_unit_path.exists(),
+    }
+    if skip:
+        snapshot.update(
+            {
+                "status": "skipped",
+                "message": "service check skipped",
+            }
+        )
+        return snapshot
+
+    active = run_external_command(["systemctl", "--user", "is-active", name], timeout=5)
+    enabled = run_external_command(["systemctl", "--user", "is-enabled", name], timeout=5)
+    active_state = active["stdout"] or "unknown"
+    enabled_state = enabled["stdout"] or "unknown"
+    if active.get("timedOut") or enabled.get("timedOut"):
+        status = "unknown"
+    elif active_state == "active":
+        status = "active"
+    elif not expanded_unit_path.exists():
+        status = "unit-missing"
+    else:
+        status = active_state
+    snapshot.update(
+        {
+            "status": status,
+            "activeState": active_state,
+            "enabledState": enabled_state,
+            "systemctl": {
+                "isActive": active,
+                "isEnabled": enabled,
+            },
+        }
+    )
+    return snapshot
+
+
+def run_external_command(command: list[str], timeout: float = 10.0) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return {
+            "command": command,
+            "returnCode": result.returncode,
+            "ok": result.returncode == 0,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+        }
+    except FileNotFoundError as exc:
+        return {
+            "command": command,
+            "returnCode": None,
+            "ok": False,
+            "stdout": "",
+            "stderr": str(exc),
+        }
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        return {
+            "command": command,
+            "returnCode": None,
+            "ok": False,
+            "timedOut": True,
+            "stdout": stdout.strip(),
+            "stderr": stderr.strip(),
+        }
+
+
+def ops_next_actions(
+    state_status: dict[str, Any],
+    ibkr_status: dict[str, Any],
+    service_status: dict[str, Any],
+) -> list[str]:
+    actions: list[str] = []
+    if ibkr_status.get("status") == "error":
+        actions.append("Restore IBKR Gateway/TWS connectivity, then run `ibkr-strategy-runner --json doctor`.")
+    if not service_status.get("unitExists", False) and service_status.get("status") != "skipped":
+        actions.append("Install the user service with `ibkr-strategy-runner service install --now ...`.")
+    elif service_status.get("status") not in {"active", "skipped"}:
+        actions.append("Start or refresh the daemon with `ibkr-strategy-runner service restart`.")
+    if state_status.get("status") == "unavailable":
+        actions.append("Set `--account` or `IB_ACCOUNT` so state can be loaded without guessing the account.")
+    if state_status.get("unknownCompletedOrderCount", 0):
+        actions.append("Resolve unknown completed orders with `resolve-order` after verifying the order in IBKR.")
+    if state_status.get("pendingOrderCount", 0):
+        actions.append("Watch bot pending orders with `bot-orders` and broker open orders with `open-orders`.")
+    if not actions:
+        actions.append("No immediate operator action.")
+    return actions
+
+
+def ops_overall_status(
+    state_status: dict[str, Any],
+    ibkr_status: dict[str, Any],
+    service_status: dict[str, Any],
+) -> str:
+    if state_status.get("needsAttention") or state_status.get("status") == "unavailable":
+        return "attention"
+    if ibkr_status.get("status") == "error":
+        return "warning"
+    if not service_status.get("unitExists", False) and service_status.get("status") != "skipped":
+        return "warning"
+    if service_status.get("status") not in {"active", "skipped"}:
+        return "warning"
+    return "ok"
 
 
 def load_leaps_config(args: argparse.Namespace) -> LeapsStrategyConfig:

@@ -8,30 +8,44 @@ against paper first, then a tightly capped real account.
 Install or refresh the user service:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/ibkr-strategy-runner-leaps.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now ibkr-strategy-runner-leaps.service
+PY=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.venv/bin/python
+ENV=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.env
+CONFIG=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/configs-QQQ.json
+STATE_DIR=/home/hliu/.local/state/ibkr-strategy-runner
+
+$PY -m ibkr_strategy_runner --env-file "$ENV" --account DUO585078 service install \
+  --config "$CONFIG" \
+  --state-dir "$STATE_DIR" \
+  --state-backend sqlite \
+  --execute \
+  --python "$PY" \
+  --working-directory /home/hliu/proj/trading/ibkr/ibkr_strategy_runner \
+  --now
 ```
 
 After Python code changes:
 
 ```bash
-systemctl --user restart ibkr-strategy-runner-leaps.service
+ibkr-strategy-runner service restart
 ```
 
-After service-file changes:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user restart ibkr-strategy-runner-leaps.service
-```
+After service setting changes, rerun `service install` with the intended
+arguments and `--now`.
 
 Confirm the exact command and current process state:
 
 ```bash
-systemctl --user cat ibkr-strategy-runner-leaps.service
-systemctl --user status ibkr-strategy-runner-leaps.service
+ibkr-strategy-runner service cat
+ibkr-strategy-runner service status
+```
+
+Use the operator dashboard for a combined service, state, risk, and IBKR view:
+
+```bash
+ibkr-strategy-runner --json ops \
+  --config "$CONFIG" \
+  --state-dir "$STATE_DIR" \
+  --state-backend sqlite
 ```
 
 ## IB Gateway Or TWS
@@ -64,7 +78,7 @@ journalctl --user -u ibkr-strategy-runner-leaps.service -f
 Review recent logs:
 
 ```bash
-journalctl --user -u ibkr-strategy-runner-leaps.service --since "today"
+ibkr-strategy-runner service logs --since "today" --lines 200
 ```
 
 Limit retained user journal size if needed:
@@ -98,7 +112,7 @@ ibkr-strategy-runner --json bot-positions --config configs-QQQ.json --state-dir 
 Stop the strategy first:
 
 ```bash
-systemctl --user stop ibkr-strategy-runner-leaps.service
+ibkr-strategy-runner service stop
 ```
 
 Then inspect and cancel live IBKR orders manually:

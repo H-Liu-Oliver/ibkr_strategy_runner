@@ -9,8 +9,10 @@ from ibkr_strategy_runner.cli import (
     cmd_doctor,
     cmd_fills,
     cmd_journal,
+    cmd_ops,
     cmd_resolve_order,
     cmd_risk,
+    cmd_service_install,
     cmd_status,
 )
 from ibkr_strategy_runner.config import Settings
@@ -41,7 +43,11 @@ def make_args(state_dir: Path, **overrides: object) -> argparse.Namespace:
         "date": "2026-05-01",
         "limit": 10,
         "skip_ibkr": True,
+        "skip_service": True,
         "service_unit": state_dir / "ibkr-strategy-runner-leaps.service",
+        "unit_path": state_dir / "ibkr-strategy-runner-leaps.service",
+        "name": "ibkr-strategy-runner-leaps.service",
+        "state_backend": "json",
     }
     payload.update(overrides)
     return argparse.Namespace(**payload)
@@ -173,6 +179,49 @@ class OperatorCommandTest(unittest.TestCase):
             self.assertEqual(status["unknownCompletedOrderCount"], 0)
             self.assertFalse(status["needsAttention"])
             self.assertEqual(journal["events"][0]["event"], "resolve-order")
+
+    def test_ops_dashboard_combines_state_risk_and_next_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seed_state(Path(tmp))
+
+            result = cmd_ops(
+                make_settings(),
+                make_args(Path(tmp), skip_ibkr=True, skip_service=True),
+            )
+
+            self.assertEqual(result["status"], "attention")
+            self.assertEqual(result["service"]["status"], "skipped")
+            self.assertEqual(result["state"]["pendingOrderCount"], 1)
+            self.assertEqual(result["state"]["unknownCompletedOrderCount"], 1)
+            self.assertEqual(result["risk"]["usage"]["dailyOrderCount"], 2)
+            self.assertTrue(
+                any("Resolve unknown completed orders" in action for action in result["nextActions"])
+            )
+
+    def test_service_install_dry_run_returns_unit_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            unit_path = Path(tmp) / "ibkr-strategy-runner-leaps.service"
+
+            result = cmd_service_install(
+                make_settings(),
+                make_args(
+                    Path(tmp),
+                    unit_path=unit_path,
+                    python="/tmp/python",
+                    working_directory="/work/tree",
+                    execute=True,
+                    dry_run=True,
+                    now=False,
+                    state_backend="sqlite",
+                ),
+            )
+
+            self.assertFalse(unit_path.exists())
+            self.assertFalse(result["written"])
+            self.assertIn("/tmp/python -m ibkr_strategy_runner", result["unit"])
+            self.assertIn("--account DU123456", result["unit"])
+            self.assertIn("--state-backend sqlite", result["unit"])
+            self.assertIn("--execute", result["unit"])
 
 
 if __name__ == "__main__":

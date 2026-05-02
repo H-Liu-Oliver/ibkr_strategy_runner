@@ -407,32 +407,48 @@ ibkr-strategy-runner --json run-leaps \
   --execute
 ```
 
-Install the user `systemd` service:
+Install or refresh the user `systemd` service:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/ibkr-strategy-runner-leaps.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now ibkr-strategy-runner-leaps.service
+PY=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.venv/bin/python
+ENV=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/.env
+CONFIG=/home/hliu/proj/trading/ibkr/ibkr_strategy_runner/configs-QQQ.json
+STATE=/home/hliu/.local/state/ibkr-strategy-runner
+
+$PY -m ibkr_strategy_runner --env-file "$ENV" --account DUO585078 service install \
+  --config "$CONFIG" \
+  --state-dir "$STATE" \
+  --state-backend sqlite \
+  --execute \
+  --python "$PY" \
+  --working-directory /home/hliu/proj/trading/ibkr/ibkr_strategy_runner \
+  --now
 ```
 
 After editing Python code:
 
 ```bash
-systemctl --user restart ibkr-strategy-runner-leaps.service
+ibkr-strategy-runner service restart
 ```
 
-After editing the service file:
+After editing service settings, run `service install` again with the intended
+arguments and `--now`.
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user restart ibkr-strategy-runner-leaps.service
+ibkr-strategy-runner --env-file "$ENV" --account DUO585078 service install \
+  --config "$CONFIG" \
+  --state-dir "$STATE" \
+  --state-backend sqlite \
+  --execute \
+  --python "$PY" \
+  --working-directory /home/hliu/proj/trading/ibkr/ibkr_strategy_runner \
+  --now
 ```
 
 Show the exact service command:
 
 ```bash
-systemctl --user cat ibkr-strategy-runner-leaps.service
+ibkr-strategy-runner service cat
 ```
 
 ## Monitoring
@@ -440,9 +456,17 @@ systemctl --user cat ibkr-strategy-runner-leaps.service
 Service status and logs:
 
 ```bash
-systemctl --user status ibkr-strategy-runner-leaps.service
-journalctl --user -u ibkr-strategy-runner-leaps.service -f
-journalctl --user -u ibkr-strategy-runner-leaps.service --since "today"
+ibkr-strategy-runner service status
+ibkr-strategy-runner service logs --since "today" --lines 200
+```
+
+One-command operator dashboard:
+
+```bash
+ibkr-strategy-runner --json ops \
+  --config configs-QQQ.json \
+  --state-dir /home/hliu/.local/state/ibkr-strategy-runner \
+  --state-backend sqlite
 ```
 
 IBKR account/order status:
